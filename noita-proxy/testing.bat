@@ -1,0 +1,3 @@
+set NP_SKIP_MOD_CHECK=1
+set NP_NOITA_ADDR=127.0.0.1:21252
+cargo run

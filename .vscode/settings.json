@@ -4,11 +4,15 @@
         "cast-local-type",
         "param-type-mismatch",
         "undefined-global",
-        "need-check-nil"
+        "need-check-nil",
+        "lowercase-global"
     ],
     "Lua.diagnostics.globals": [
         "wait",
         "async"
     ],
-    "C_Cpp.default.compilerPath": "/usr/bin/clang++"
+    "C_Cpp.default.compilerPath": "/usr/bin/clang++",
+    "Lua.workspace.library": [
+        "C:\\Games\\Noita v30.04.2024\\mods\\NoitaDearImGui\\imguidoc"
+    ]
 }
