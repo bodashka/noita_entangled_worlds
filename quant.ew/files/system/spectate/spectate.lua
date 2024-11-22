@@ -24,6 +24,13 @@ local attached = false
 
 local redo = false
 
+local function cant_spectate(ent)
+    return ((GameHasFlagRun("ending_game_completed") or ctx.proxy_opt.perma_death)
+            and EntityHasTag(ent, "ew_notplayer"))
+            or (EntityHasTag(ent, "polymorphed_cessation")
+                and cam_target ~= nil and cam_target.entity ~= ent)
+end
+
 local function perks_ui(enable)
     for _, child in ipairs(EntityGetAllChildren(ctx.my_player.entity) or {}) do
         if EntityHasTag(child, "perk_entity") then
@@ -44,9 +51,14 @@ local function perks_ui(enable)
     end
 end
 
+spectate.nofun = false
+
 function spectate.disable_throwing(enable, entity)
     if entity == nil then
         entity = cam_target.entity
+    end
+    if spectate.nofun and not enable and entity == ctx.my_player.entity and EntityHasTag(ctx.my_player.entity, "ew_notplayer") then
+        return
     end
     local inv
     for _, child in ipairs(EntityGetAllChildren(entity) or {}) do
@@ -67,7 +79,7 @@ local function get_me()
     local i = 0
     local alive = -1, -1
     for peer_id, potential_target in pairs(ctx.players) do
-        if GameHasFlagRun("ending_game_completed") and EntityHasTag(potential_target.entity, "ew_notplayer") then
+        if cant_spectate(potential_target.entity) then
             goto continue
         end
         i = i + 1
@@ -82,6 +94,9 @@ end
 
 local function set_camera_free(enable)
     local cam = EntityGetFirstComponentIncludingDisabled(ctx.my_player.entity, "PlatformShooterPlayerComponent")
+    if EntityHasTag(ctx.my_player.entity, "polymorphed_cessation") then
+        return
+    end
     if cam ~= nil then
         ComponentSetValue2(cam, "center_camera_on_this_entity", not enable)
         ComponentSetValue2(cam, "move_camera_with_aim", not enable)
@@ -90,6 +105,9 @@ end
 
 local function set_camera_position(x, y)
     local cam = EntityGetFirstComponentIncludingDisabled(ctx.my_player.entity, "PlatformShooterPlayerComponent")
+    if cam == nil then
+        cam = EntityAddComponent2(ctx.my_player.entity, "PlatformShooterPlayerComponent", {center_camera_on_this_entity=false, move_camera_with_aim=false})
+    end
     if cam ~= nil then
         ComponentSetValue2(cam, "mDesiredCameraPos", x, y)
     end
@@ -213,7 +231,7 @@ local function set_camera_pos()
     if cam_target == nil or re_cam then
         local i = 0
         for peer_id, potential_target in pairs(ctx.players) do
-            if GameHasFlagRun("ending_game_completed") and EntityHasTag(potential_target.entity, "ew_notplayer") then
+            if cant_spectate(potential_target.entity) then
                 goto continue
             end
             i = i + 1
@@ -241,7 +259,7 @@ end
 local function update_i()
     local i = 0
     for peer_id, potential_target in pairs(ctx.players) do
-        if GameHasFlagRun("ending_game_completed") and EntityHasTag(potential_target.entity, "ew_notplayer") then
+        if cant_spectate(potential_target.entity) then
             goto continue
         end
         i = i + 1
@@ -258,7 +276,7 @@ end
 local function number_of_players()
     local i = 0
     for _, potential_target in pairs(ctx.players) do
-        if GameHasFlagRun("ending_game_completed") and EntityHasTag(potential_target.entity, "ew_notplayer") then
+        if cant_spectate(potential_target.entity) then
             goto continue
         end
         i = i + 1
@@ -291,7 +309,8 @@ function spectate.on_world_update()
         update_i()
         last_len = number_of_players()
     end
-    if cam_target ~= nil and GameHasFlagRun("ending_game_completed") and EntityHasTag(cam_target.entity, "ew_notplayer") then
+    if cam_target ~= nil
+            and cant_spectate(cam_target.entity) then
         update_i()
         last_len = number_of_players()
     end
@@ -299,7 +318,7 @@ function spectate.on_world_update()
         return
     end
 
-    if InputIsKeyJustDown(54) or InputIsJoystickButtonJustDown(0, 13) then
+    if InputIsKeyJustDown(tonumber(ModSettingGet("quant.ew.rebind_lspectate"))) or InputIsJoystickButtonJustDown(0, 13) then
         camera_player = camera_player - 1
         if camera_player < 1 then
             camera_player = last_len
@@ -307,13 +326,16 @@ function spectate.on_world_update()
 
         has_switched = true
         re_cam = true
-    elseif InputIsKeyJustDown(55) or InputIsJoystickButtonJustDown(0, 14) then
+    elseif InputIsKeyJustDown(tonumber(ModSettingGet("quant.ew.rebind_rspectate"))) or InputIsJoystickButtonJustDown(0, 14) then
         camera_player = camera_player + 1
         if camera_player > last_len then
             camera_player = 1
         end
 
         has_switched = true
+        re_cam = true
+    elseif InputIsKeyJustDown(tonumber(ModSettingGet("quant.ew.rebind_sspectate"))) then
+        camera_player_id, camera_player = get_me()
         re_cam = true
     end
     set_camera_pos()
@@ -327,7 +349,7 @@ function spectate.on_world_update()
         if GameGetIsGamepadConnected() then
             text = "Use d-pad-left and d-pad-right keys to spectate over other players."
         else
-            text = "Use ',' and '.' keys to spectate over other players."
+            text = "Use ',' and '.' keys to spectate over other players. '/' for self"
         end
         local tw, th = GuiGetTextDimensions(gui, text)
         GuiText(gui, w-2-tw, h-1-th, text)

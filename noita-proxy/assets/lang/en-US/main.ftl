@@ -53,6 +53,7 @@ noita_connected = Local Noita instance connected.
 netman_save_lobby = Save lobby id to clipboard
 netman_show_settings = Show settings screen
 netman_apply_settings = Apply settings to be used in the next run
+apply_default_settings = Resets settings to default
 
 ip_note = Note: steam networking is more reliable. Use it, if possible.
 ip_connect = Connect to IP
@@ -68,6 +69,8 @@ launcher_no_command = Can't start noita: no launch command.
 launcher_no_command_2 = Launch command can be specified with --launch-cmd <command> option.
 launcher_no_command_3 = You can put `noita-proxy --launch-cmd "%command%"` in steam's launch options to intercept whatever command steam uses to start the game.
 launcher_start_game = Start noita
+launcher_end_run = End run
+launcher_end_run_confirm = Confirm
 launcher_only_when_awaiting = Can only launch the game in "waiting for noita connection" state.
 
 connect_settings = Game settings
@@ -75,6 +78,7 @@ connect_settings_debug = Debug settings
 connect_settings_debug_en = Debug/cheat mode
 connect_settings_debug_fixed_seed = Use fixed seed
 connect_settings_seed = Seed:
+connect_settings_max_players = Max players
 connect_settings_wsv = World sync version to use:
 connect_settings_player_tether = Player tether enabled
 connect_settings_player_tether_desc = Player tether: Teleports clients to host if they get far enough.
@@ -86,12 +90,18 @@ connect_settings_autostart = Start the game automatically
 
 ## Game settings
 
+connect_settings_spacewars = Allow using steam networking even if you don't have the game on steam, in case you have the gog version of the game. All players need this ticked to work, restart proxy to take effect
 Health-per-player = Health per player
 Enable-friendly-fire = Enable friendly fire, allows picking teams in lobby
 Have-perk-pools-be-independent-of-each-other = Have perk pools be independent of each other
 Amount-of-chunks-host-has-loaded-at-once-synced-enemies-and-physics-objects-need-to-be-loaded-in-by-host-to-be-rendered-by-clients = Amount of chunks host has loaded at once, synced enemies and physics objects need to be loaded in by host to be rendered by clients
 local_health_desc_1 = Every player has their own health, run ends when all player are dead.
 local_health_desc_2 = There is a respawn mechanic.
+Health-percent-lost-on-reviving = Percent of Max HP lost on reviving
+global_hp_loss = Lose HP globally
+no_material_damage = No material damage
+perma_death = Perma death
+physics_damage = Physics damage
 shared_health_desc_1 = Health is shared, but scales with player count.
 shared_health_desc_2 = Percentage-based damage and full heals are adjusted.
 shared_health_desc_3 = The original mode.
@@ -126,10 +136,19 @@ Shift-hue = Shift hue
 ## Connected
 
 Show-debug-info = Show debug/connection info
-hint_spectate = Use [',' or d-pad-left] and ['.' or d-pad-right] keys to spectate over other players.
+hint_spectate = Use [',' or d-pad-left] and ['.' or d-pad-right] keys to spectate over other players. '/' for self
 hint_ping = [Middle mouse button or right thumb stick] spawns a ping
+Show-debug-plot = Show debug plot
+Record-everything-sent-to-noita = Record EVERYTHING sent to noita.
 
 ## IP Connect
 
 ip_could_not_connect = Could not connect
 ip_wait_for_connection = Connecting to ip...
+## Info
+
+info_stress_tests = We're doing public lobbies (a.k.a stress tests) every saturday, 18:00 UTC. Join our discord for more info.
+Info = Info
+## Local settings
+
+connect_settings_random_ports = Don't use a predetermined port. Makes things a bit more robust and allows multiple proxies to be launched on the same computer, but Noita will have to be launched through the proxy.

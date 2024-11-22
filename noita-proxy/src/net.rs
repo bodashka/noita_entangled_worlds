@@ -5,16 +5,13 @@ use proxy_opt::ProxyOpt;
 use socket2::{Domain, Socket, Type};
 use std::fs::{create_dir, remove_dir_all, File};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, Ordering};
+use std::sync::{Arc, Mutex};
 use std::{
     env,
     fmt::Display,
     io::{self, Write},
     net::{SocketAddr, TcpListener, TcpStream},
-    sync::{
-        atomic::{self, AtomicBool},
-        Arc, Mutex,
-    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -29,7 +26,7 @@ use crate::player_cosmetics::{create_player_png, PlayerPngDesc};
 use crate::{
     bookkeeping::save_state::{SaveState, SaveStateEntry},
     recorder::Recorder,
-    GameSettings, PlayerColor,
+    DefaultSettings, GameSettings, PlayerColor,
 };
 pub mod messages;
 mod proxy_opt;
@@ -113,6 +110,7 @@ pub struct NetManagerInit {
     pub player_path: PathBuf,
     pub modmanager_settings: ModmanagerSettings,
     pub player_png_desc: PlayerPngDesc,
+    pub noita_port: u16,
 }
 
 pub struct NetManager {
@@ -133,6 +131,10 @@ pub struct NetManager {
     pub friendly_fire: AtomicBool,
     pub ban_list: Mutex<Vec<OmniPeerId>>,
     pub kick_list: Mutex<Vec<OmniPeerId>>,
+    pub no_more_players: AtomicBool,
+    dont_kick: Mutex<Vec<OmniPeerId>>,
+    pub dirty: AtomicBool,
+    pub actual_noita_port: AtomicU16,
 }
 
 impl NetManager {
@@ -155,6 +157,10 @@ impl NetManager {
             friendly_fire: AtomicBool::new(false),
             ban_list: Default::default(),
             kick_list: Default::default(),
+            no_more_players: AtomicBool::new(false),
+            dont_kick: Default::default(),
+            dirty: AtomicBool::new(false),
+            actual_noita_port: AtomicU16::new(0),
         }
         .into()
     }
@@ -212,12 +218,19 @@ impl NetManager {
         let address: SocketAddr = env::var("NP_NOITA_ADDR")
             .ok()
             .and_then(|x| x.parse().ok())
-            .unwrap_or_else(|| "127.0.0.1:21251".parse().unwrap());
+            .unwrap_or_else(|| {
+                SocketAddr::new("127.0.0.1".parse().unwrap(), self.init_settings.noita_port)
+            });
         info!("Listening for noita connection on {}", address);
         let address = address.into();
         socket.bind(&address)?;
         socket.listen(1)?;
         socket.set_nonblocking(true)?;
+
+        let actual_port = socket.local_addr()?.as_socket().unwrap().port();
+        self.actual_noita_port.store(actual_port, Ordering::Relaxed);
+        info!("Actual Noita port: {actual_port}");
+
         let local_server: TcpListener = socket.into();
 
         let is_host = self.is_host();
@@ -241,31 +254,29 @@ impl NetManager {
             self.is_host(),
         );
         let mut timer = Instant::now();
-        while self.continue_running.load(atomic::Ordering::Relaxed) {
+        while self.continue_running.load(Ordering::Relaxed) {
             if cli {
                 if let Some(n) = self.peer.lobby_id() {
                     println!("Lobby ID: {}", n.raw());
                     cli = false
                 }
             }
-            if self.friendly_fire.load(atomic::Ordering::Relaxed) {
-                let team = self.friendly_fire_team.load(atomic::Ordering::Relaxed);
-                if timer.elapsed().as_secs() > 4 {
-                    state.try_ws_write_option("friendly_fire_team", (team + 1) as u32);
-                    timer = Instant::now()
-                }
+            if self.friendly_fire.load(Ordering::Relaxed) && timer.elapsed().as_secs() > 4 {
+                let team = self.friendly_fire_team.load(Ordering::Relaxed);
+                state.try_ws_write_option("friendly_fire_team", (team + 1) as u32);
+                timer = Instant::now()
             }
-            if self.end_run.load(atomic::Ordering::Relaxed) {
+            if self.end_run.load(Ordering::Relaxed) {
                 for id in self.peer.iter_peer_ids() {
                     self.send(id, &NetMsg::EndRun, Reliability::Reliable);
                 }
                 state.try_ws_write(ws_encode_proxy("end_run", self.peer.my_id().to_string()));
                 self.end_run(&mut state);
-                self.end_run.store(false, atomic::Ordering::Relaxed);
+                self.end_run.store(false, Ordering::Relaxed);
             }
             self.local_connected
-                .store(state.ws.is_some(), atomic::Ordering::Relaxed);
-            if state.ws.is_none() && self.accept_local.load(atomic::Ordering::SeqCst) {
+                .store(state.ws.is_some(), Ordering::Relaxed);
+            if state.ws.is_none() && self.accept_local.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_millis(10));
                 if let Ok((stream, addr)) = local_server.accept() {
                     info!("New stream incoming from {}", addr);
@@ -275,7 +286,7 @@ impl NetManager {
                         .inspect_err(|e| error!("Could not init websocket: {}", e))
                         .ok();
                     if state.ws.is_some() {
-                        if self.enable_recorder.load(atomic::Ordering::Relaxed) {
+                        if self.enable_recorder.load(Ordering::Relaxed) {
                             state.recorder = Some(Recorder::default());
                         }
                         self.on_ws_connection(&mut state);
@@ -287,8 +298,28 @@ impl NetManager {
                     warn!("Websocket flush not ok: {err}");
                 }
             }
-            let mut list = self.kick_list.lock().unwrap();
+            let mut to_kick = self.kick_list.lock().unwrap();
+            let mut dont_kick = self.dont_kick.lock().unwrap();
+            if self.no_more_players.load(Ordering::Relaxed) {
+                if dont_kick.is_empty() {
+                    dont_kick.extend(self.peer.iter_peer_ids())
+                } else {
+                    for peer in self.peer.iter_peer_ids() {
+                        if !dont_kick.contains(&peer) {
+                            to_kick.push(peer);
+                        }
+                    }
+                }
+            } else {
+                dont_kick.clear()
+            }
+            let list = self.ban_list.lock().unwrap();
             for peer in list.iter() {
+                if self.peer.iter_peer_ids().contains(peer) {
+                    to_kick.push(*peer)
+                }
+            }
+            for peer in to_kick.iter() {
                 info!("player kicked: {}", peer);
                 state.try_ws_write(ws_encode_proxy("leave", peer.as_hex()));
                 state.world.handle_peer_left(*peer);
@@ -298,20 +329,7 @@ impl NetManager {
                     Reliability::Reliable,
                 );
             }
-            list.clear();
-            let list = self.ban_list.lock().unwrap();
-            for peer in list.iter() {
-                if self.peer.iter_peer_ids().contains(peer) {
-                    info!("player kicked from ban: {}", peer);
-                    state.try_ws_write(ws_encode_proxy("leave", peer.as_hex()));
-                    state.world.handle_peer_left(*peer);
-                    self.send(*peer, &NetMsg::Kick, Reliability::Reliable);
-                    self.broadcast(
-                        &NetMsg::PeerDisconnected { id: *peer },
-                        Reliability::Reliable,
-                    );
-                }
-            }
+            to_kick.clear();
             for net_event in self.peer.recv() {
                 match net_event {
                     omni::OmniNetworkEvent::PeerConnected(id) => {
@@ -374,7 +392,7 @@ impl NetManager {
                             NetMsg::StartGame { settings } => {
                                 *self.settings.lock().unwrap() = settings;
                                 info!("Settings updated");
-                                self.accept_local.store(true, atomic::Ordering::SeqCst);
+                                self.accept_local.store(true, Ordering::SeqCst);
                                 state.world.reset();
                             }
                             NetMsg::ModRaw { data } => {
@@ -419,8 +437,7 @@ impl NetManager {
                         break
                     }
                     Err(err) => {
-                        error!("Error occured while reading from websocket: {}", err);
-                        error!("Likely that just means that the game has closed.");
+                        warn!("Game closed (Lost connection to noita instance: {})", err);
                         state.ws = None;
                     }
                 }
@@ -474,6 +491,7 @@ impl NetManager {
             .expect("can set write timeout");
 
         let settings = self.settings.lock().unwrap();
+        let def = DefaultSettings::default();
         state.try_ws_write(ws_encode_proxy("seed", settings.seed));
         let my_id = self.peer.my_id();
         state.try_ws_write(ws_encode_proxy("peer_id", format!("{:016x}", my_id.0)));
@@ -487,21 +505,83 @@ impl NetManager {
         } else {
             info!("No nickname chosen");
         }
-        self.friendly_fire
-            .store(settings.friendly_fire, atomic::Ordering::Relaxed);
-        state.try_ws_write_option("friendly_fire", settings.friendly_fire);
-        state.try_ws_write_option("debug", settings.debug_mode);
-        state.try_ws_write_option("world_sync_version", settings.world_sync_version);
-        state.try_ws_write_option("player_tether", settings.player_tether);
-        state.try_ws_write_option("tether_length", settings.tether_length);
-        state.try_ws_write_option("item_dedup", settings.item_dedup);
-        state.try_ws_write_option("randomize_perks", settings.randomize_perks);
-        state.try_ws_write_option("enemy_hp_scale", settings.enemy_hp_mult);
-        state.try_ws_write_option("world_sync_interval", settings.world_sync_interval);
-        state.try_ws_write_option("game_mode", settings.game_mode);
-        state.try_ws_write_option("chunk_target", settings.chunk_target);
-        state.try_ws_write_option("health_per_player", settings.health_per_player);
-        state.try_ws_write_option("enemy_sync_interval", settings.enemy_sync_interval);
+        let ff = settings.friendly_fire.unwrap_or(def.friendly_fire);
+        self.friendly_fire.store(ff, Ordering::Relaxed);
+        state.try_ws_write_option("friendly_fire", ff);
+        state.try_ws_write_option("debug", settings.debug_mode.unwrap_or(def.debug_mode));
+        state.try_ws_write_option(
+            "world_sync_version",
+            settings
+                .world_sync_version
+                .unwrap_or(def.world_sync_version),
+        );
+        state.try_ws_write_option(
+            "player_tether",
+            settings.player_tether.unwrap_or(def.player_tether),
+        );
+        state.try_ws_write_option(
+            "tether_length",
+            settings.tether_length.unwrap_or(def.tether_length),
+        );
+        state.try_ws_write_option("item_dedup", settings.item_dedup.unwrap_or(def.item_dedup));
+        state.try_ws_write_option(
+            "randomize_perks",
+            settings.randomize_perks.unwrap_or(def.randomize_perks),
+        );
+        state.try_ws_write_option(
+            "enemy_hp_scale",
+            settings.enemy_hp_mult.unwrap_or(def.enemy_hp_mult),
+        );
+        state.try_ws_write_option(
+            "world_sync_interval",
+            settings
+                .world_sync_interval
+                .unwrap_or(def.world_sync_interval),
+        );
+        state.try_ws_write_option("game_mode", settings.game_mode.unwrap_or(def.game_mode));
+        state.try_ws_write_option(
+            "chunk_target",
+            settings.chunk_target.unwrap_or(def.chunk_target),
+        );
+        state.try_ws_write_option(
+            "health_per_player",
+            settings.health_per_player.unwrap_or(def.health_per_player),
+        );
+        state.try_ws_write_option(
+            "enemy_sync_interval",
+            settings
+                .enemy_sync_interval
+                .unwrap_or(def.enemy_sync_interval),
+        );
+        state.try_ws_write_option(
+            "global_hp_loss",
+            settings.global_hp_loss.unwrap_or(def.global_hp_loss),
+        );
+        state.try_ws_write_option(
+            "perma_death",
+            settings.perma_death.unwrap_or(def.perma_death),
+        );
+        state.try_ws_write_option(
+            "physics_damage",
+            settings.physics_damage.unwrap_or(def.physics_damage),
+        );
+        let lst = settings.clone();
+        state.try_ws_write_option(
+            "perk_ban_list",
+            lst.perk_ban_list.unwrap_or(def.perk_ban_list).as_str(),
+        );
+        state.try_ws_write_option(
+            "no_material_damage",
+            settings
+                .no_material_damage
+                .unwrap_or(def.no_material_damage),
+        );
+        state.try_ws_write_option(
+            "health_lost_on_revive",
+            settings
+                .health_lost_on_revive
+                .unwrap_or(def.health_lost_on_revive),
+        );
         let rgb = self.init_settings.player_color.player_main;
         state.try_ws_write_option(
             "mina_color",
@@ -555,7 +635,7 @@ impl NetManager {
                 error!("Error in netmanager: {}", err);
                 *self.error.lock().unwrap() = Some(err);
             }
-            self.stopped.store(true, atomic::Ordering::Relaxed);
+            self.stopped.store(true, Ordering::Relaxed);
         })
     }
 
@@ -650,7 +730,8 @@ impl NetManager {
                 .get_progress()
                 .unwrap_or_default();
             *self.settings.lock().unwrap() = settings;
-            state.world.reset()
+            state.world.reset();
+            self.dirty.store(false, Ordering::Relaxed);
         }
         self.resend_game_settings();
     }

@@ -554,10 +554,10 @@ impl WorldManager {
                 match current_authority {
                     Some((authority, priority_state)) => {
                         if source == authority {
-                            info!("{source} already has authority of {chunk:?}");
+                            debug!("{source} already has authority of {chunk:?}");
                             self.emit_got_authority(chunk, source, priority);
                         } else if priority_state > priority && !can_wait {
-                            info!("{source} is gaining priority over {chunk:?} from {authority}");
+                            debug!("{source} is gaining priority over {chunk:?} from {authority}");
                             self.emit_transfer_authority(chunk, source, priority, authority);
                         } else {
                             debug!("{source} requested authority for {chunk:?}, but it's already taken by {authority}");
@@ -790,7 +790,7 @@ impl WorldManager {
                 current_authority,
             } => {
                 if self.chunk_state.get(&chunk) != Some(&ChunkState::UnloadPending) {
-                    info!("Will request authority transfer");
+                    debug!("Will request authority transfer");
                     self.chunk_state.insert(chunk, ChunkState::Transfer);
                     self.emit_msg(
                         Destination::Peer(current_authority),
@@ -807,7 +807,7 @@ impl WorldManager {
                 }
             }
             WorldNetMessage::RequestAuthorityTransfer { chunk } => {
-                info!("Got a request for authority transfer");
+                debug!("Got a request for authority transfer");
                 let state = self.chunk_state.get(&chunk);
                 if let Some(ChunkState::Authority { listeners, .. }) = state {
                     let chunk_data = self.outbound_model.get_chunk_data(chunk);
@@ -837,7 +837,7 @@ impl WorldManager {
                 chunk_data,
                 listeners,
             } => {
-                info!("Transfer ok");
+                debug!("Transfer ok");
                 if let Some(chunk_data) = chunk_data {
                     self.inbound_model.apply_chunk_data(chunk, &chunk_data);
                     self.outbound_model.apply_chunk_data(chunk, &chunk_data);
@@ -874,12 +874,12 @@ impl WorldManager {
                 );
             }
             WorldNetMessage::NotifyNewAuthority { chunk } => {
-                info!("Notified of new authority");
+                debug!("Notified of new authority");
                 let state = self.chunk_state.get_mut(&chunk);
                 if let Some(ChunkState::Listening { authority, .. }) = state {
                     *authority = source;
                 } else {
-                    warn!("Got notified of new authority, but not a listener");
+                    debug!("Got notified of new authority, but not a listener");
                 }
             }
         }

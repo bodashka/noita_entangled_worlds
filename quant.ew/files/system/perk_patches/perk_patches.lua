@@ -20,6 +20,11 @@ else
     ModLuaFileAppend("data/scripts/perks/perk_list.lua", "mods/quant.ew/files/system/perk_patches/append/perks_local.lua")
 end
 
+if not ctx.is_host or not ctx.proxy_opt.randomize_perks then
+    --print("Hiding telekinesis")
+    ModLuaFileAppend("data/scripts/perks/perk_list.lua", "mods/quant.ew/files/system/perk_patches/append/perks_no_telekinesis.lua")
+end
+
 rpc.opts_reliable()
 rpc.opts_everywhere()
 function rpc.modify_max_hp(percent_amount, do_heal)
@@ -38,7 +43,19 @@ function rpc.modify_max_hp(percent_amount, do_heal)
     end
 end
 
-np.CrossCallAdd("ew_perks_modify_max_hp", rpc.modify_max_hp)
+util.add_cross_call("ew_perks_modify_max_hp", rpc.modify_max_hp)
+
+util.add_cross_call("ew_ff", function()
+    return ctx.proxy_opt.friendly_fire
+end)
+
+util.add_cross_call("ew_perk_ban_list", function()
+    return ctx.proxy_opt.perk_ban_list
+end)
+
+util.add_cross_call("ew_randomize_perks", function()
+    return ctx.proxy_opt.randomize_perks
+end)
 
 rpc.opts_everywhere()
 function rpc.sync_perk_amount(items, genome)

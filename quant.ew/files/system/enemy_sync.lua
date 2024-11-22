@@ -2,8 +2,9 @@ local util = dofile_once("mods/quant.ew/files/core/util.lua")
 local ctx = dofile_once("mods/quant.ew/files/core/ctx.lua")
 local net = dofile_once("mods/quant.ew/files/core/net.lua")
 local player_fns = dofile_once("mods/quant.ew/files/core/player_fns.lua")
-local inventory_helper = dofile_once("mods/quant.ew/files/core/inventory_helper.lua")
+local item_sync = dofile_once("mods/quant.ew/files/system/item_sync.lua")
 local effect_sync = dofile_once("mods/quant.ew/files/system/game_effect_sync/game_effect_sync.lua")
+local stain_sync = dofile_once("mods/quant.ew/files/system/effect_data_sync/effect_data_sync.lua")
 local np = require("noitapatcher")
 
 local ffi = require("ffi")
@@ -17,7 +18,7 @@ local EnemyData = util.make_type({
 -- Variant of EnemyData for when we don't have any motion (or no VelocityComponent).
 local EnemyDataNoMotion = util.make_type({
     u32 = {"enemy_id"},
-    f32 = {"x", "y"}
+    f32 = {"x", "y"},
 })
 
 local EnemyDataWorm = util.make_type({
@@ -31,44 +32,26 @@ local EnemyDataKolmi = util.make_type({
     bool = {"enabled"},
 })
 
+local EnemyDataMom = util.make_type({
+    u32 = {"enemy_id"},
+    f32 = {"x", "y", "vx", "vy"},
+    vecbool = {"orbs"},
+})
+
 local EnemyDataFish = util.make_type({
     u32 = {"enemy_id"},
     f32 = {"x", "y", "vx", "vy"},
-    u8 = {"r"}
+    u8 = {"r"},
 })
-
---local EnemyDataSniper = util.make_type({
---    u32 = {"enemy_id"},
---    f32 = {"x", "y", "vx", "vy"},
---    bool = {"aiming"},
---})
 
 local HpData = util.make_type({
     u32 = {"enemy_id"},
     f32 = {"hp", "max_hp"}
 })
 
---local HpDataMom = util.make_type({
---    u32 = {"enemy_id"},
---    f32 = {"hp", "max_hp", "hp1", "hp2", "hp3", "hp4"}
---})
-
 local FULL_TURN = math.pi * 2
 
-local PhysData = util.make_type({
-    f32 = {"x", "y", "vx", "vy", "vr"},
-    -- We should be able to cram rotation into 1 byte.
-    u8 = {"r"}
-})
-
--- Variant of PhysData for when we don't have any motion.
-local PhysDataNoMotion = util.make_type({
-    f32 = {"x", "y"},
-    -- We should be able to cram rotation into 1 byte.
-    u8 = {"r"}
-})
-
-local wands = {}
+local frame = 0
 
 local enemy_sync = {}
 
@@ -91,7 +74,7 @@ for filename, _ in pairs(constants.phys_sync_allowed) do
     -- util.replace_text_in(filename, 'kill_entity_after_initialized="1"', 'kill_entity_after_initialized="0"')
 end
 
-np.CrossCallAdd("ew_es_death_notify", function(enemy_id, responsible_id)
+util.add_cross_call("ew_es_death_notify", function(enemy_id, responsible_id)
     local player_data = player_fns.get_player_data_by_local_entity_id(responsible_id)
     local responsible
     if player_data ~= nil then
@@ -101,14 +84,6 @@ np.CrossCallAdd("ew_es_death_notify", function(enemy_id, responsible_id)
     end
     table.insert(dead_entities, {enemy_id, responsible})
 end)
-
-local function kill(entity)
-    local parent = EntityGetParent(entity)
-    if parent ~= nil then
-        EntityKill(parent)
-    end
-    EntityKill(entity)
-end
 
 local function world_exists_for(entity)
     local x, y = EntityGetFirstHitboxCenter(entity)
@@ -132,48 +107,22 @@ local function table_extend_filtered(to, from, filter)
     end
 end
 
-local function serialize_phys_component(phys_component)
-    local px, py, pr, pvx, pvy, pvr = np.PhysBodyGetTransform(phys_component)
-    px, py = PhysicsPosToGamePos(px, py)
-    if math.abs(pvx) < 0.01 and math.abs(pvy) < 0.01 and math.abs(pvr) < 0.01 then
-        return PhysDataNoMotion {
-            x = px,
-            y = py,
-            r = math.floor((pr % FULL_TURN) / FULL_TURN * 255),
-        }
-    else
-        return PhysData {
-            x = px,
-            y = py,
-            r = math.floor((pr % FULL_TURN) / FULL_TURN * 255),
-            vx = pvx,
-            vy = pvy,
-            vr = pvr,
-        }
-    end
-end
-
-local function deserialize_phys_component(phys_component, phys_info)
-    local x, y = GamePosToPhysicsPos(phys_info.x, phys_info.y)
-    if ffi.typeof(phys_info) == PhysDataNoMotion then
-        np.PhysBodySetTransform(phys_component, x, y, phys_info.r / 255 * FULL_TURN, 0, 0, 0)
-    else
-        np.PhysBodySetTransform(phys_component, x, y, phys_info.r / 255 * FULL_TURN, phys_info.vx, phys_info.vy, phys_info.vr)
-    end
-end
-
 local function get_sync_entities(return_all)
-    local entities = {}
-    table_extend_filtered(entities, EntityGetWithTag("enemy"), function (ent)
-        return not EntityHasTag(ent, "ew_no_enemy_sync") and not EntityHasTag(ent, "wand_ghost")
-    end)
+    local entities = EntityGetWithTag("enemy") or {}
     table_extend(entities, EntityGetWithTag("ew_enemy_sync_extra"))
-    table_extend(entities, EntityGetWithTag("mimic_potion"))
     table_extend(entities, EntityGetWithTag("plague_rat"))
+    table_extend(entities, EntityGetWithTag("seed_f"))
+    table_extend(entities, EntityGetWithTag("seed_e"))
+    table_extend(entities, EntityGetWithTag("seed_d"))
+    table_extend(entities, EntityGetWithTag("seed_c"))
     table_extend(entities, EntityGetWithTag("perk_fungus_tiny"))
     table_extend(entities, EntityGetWithTag("helpless_animal"))
     table_extend_filtered(entities, EntityGetWithTag("prop_physics"), function (ent)
-        return constants.phys_sync_allowed[EntityGetFilename(ent)]
+        local f = EntityGetFilename(ent)
+        if f ~= nil then
+            return constants.phys_sync_allowed[f]
+        end
+        return true
     end)
 
     local entities2 = {}
@@ -187,6 +136,7 @@ local function get_sync_entities(return_all)
             local has_anyone = EntityHasTag(ent, "worm")
                     or EntityGetFirstComponent(ent, "BossHealthBarComponent") ~= nil
                     or #EntityGetInRadiusWithTag(x, y, DISTANCE_LIMIT, "ew_peer") ~= 0
+                    or #EntityGetInRadiusWithTag(x, y, DISTANCE_LIMIT, "polymorphed_player") ~= 0
             return has_anyone and not EntityHasTag(ent, "ew_no_enemy_sync")
         end)
     end
@@ -214,44 +164,13 @@ function enemy_sync.host_upload_entities()
         if ai_component ~= 0 and ai_component ~= nil then
             ComponentSetValue2(ai_component, "max_distance_to_cam_to_start_hunting", math.pow(2, 29))
         end
+
+        local phys_info = util.get_phys_info(enemy_id, true)
+        if phys_info == nil then
+            goto continue
+        end
+
         local hp, max_hp, has_hp = util.get_ent_health(enemy_id)
-
-        local phys_info = {}
-        local phys_info_2 = {}
-        -- Some things (like physics object) don't react well to making their entities ephemerial.
-        local not_ephemerial = false
-
-        for _, phys_component in ipairs(EntityGetComponent(enemy_id, "PhysicsBodyComponent") or {}) do
-            if phys_component ~= nil and phys_component ~= 0 then
-                not_ephemerial = true
-                local ret, info = pcall(serialize_phys_component, phys_component)
-                if not ret then
-                    GamePrint("Physics component has no body, deleting entity")
-                    kill(enemy_id)
-                    goto continue
-                end
-                table.insert(phys_info, info)
-            end
-        end
-
-        for _, phys_component in ipairs(EntityGetComponent(enemy_id, "PhysicsBody2Component") or {}) do
-            if phys_component ~= nil and phys_component ~= 0 then
-                not_ephemerial = true
-                local initialized = ComponentGetValue2(phys_component, "mInitialized")
-                if initialized then
-                    local ret, info = pcall(serialize_phys_component, phys_component)
-                    if not ret then
-                        GamePrint("Physics component has no body, deleting entity")
-                        kill(enemy_id)
-                        goto continue
-                    end
-                    table.insert(phys_info_2, info)
-                else
-                    table.insert(phys_info_2, nil)
-                end
-            end
-        end
-
         if has_hp then
             util.ensure_component_present(enemy_id, "LuaComponent", "ew_death_notify", {
                 script_death = "mods/quant.ew/files/resource/cbs/death_notify.lua"
@@ -265,8 +184,16 @@ function enemy_sync.host_upload_entities()
         --     -- local x, y, r =
         -- end
 
+        local death_triggers = {}
+        for _, com in ipairs(EntityGetComponent(enemy_id, "LuaComponent") or {}) do
+            local script = ComponentGetValue2(com, "script_death")
+            if script ~= nil and script ~= "" then
+                table.insert(death_triggers, constants.interned_filename_to_index[script] or script)
+            end
+        end
         local en_data
         local worm = EntityGetFirstComponentIncludingDisabled(enemy_id, "WormAIComponent")
+            or EntityGetFirstComponentIncludingDisabled(enemy_id, "BossDragonComponent")
         if EntityHasTag(enemy_id, "boss_centipede") then
             en_data = EnemyDataKolmi {
                 enemy_id = enemy_id,
@@ -276,8 +203,25 @@ function enemy_sync.host_upload_entities()
                 vy = vy,
                 enabled = EntityGetFirstComponent(enemy_id, "BossHealthBarComponent", "disabled_at_start") ~= nil,
             }
+        elseif EntityHasTag(enemy_id, "boss_wizard") then
+            local orbs = {false, false, false, false, false, false, false, false}
+            for _, child in ipairs(EntityGetAllChildren(enemy_id) or {}) do
+                local var = EntityGetFirstComponentIncludingDisabled(child, "VariableStorageComponent")
+                if EntityHasTag(child, "touchmagic_immunity") and var ~= nil then
+                    local n = ComponentGetValue2(var, "value_int")
+                    orbs[n] = true
+                end
+            end
+            en_data = EnemyDataMom {
+                enemy_id = enemy_id,
+                x = x,
+                y = y,
+                vx = vx,
+                vy = vy,
+                orbs = orbs
+            }
         elseif worm ~= nil then
-            local tx, ty = ComponentGetValue2(worm, "mRandomTarget")
+            local tx, ty = ComponentGetValue2(worm, "mTargetVec")
             en_data = EnemyDataWorm {
                 enemy_id = enemy_id,
                 x = x,
@@ -312,19 +256,17 @@ function enemy_sync.host_upload_entities()
             }
         end
 
-        local has_wand = false
+        local wand
         local inv = EntityGetFirstComponentIncludingDisabled(enemy_id, "Inventory2Component")
         if inv ~= nil then
             local item = ComponentGetValue2(inv, "mActualActiveItem")
             if item ~= nil and EntityGetIsAlive(item) then
-                if wands[enemy_id] == nil then
-                    wands[enemy_id] = inventory_helper.serialize_single_item(item)
+                if not EntityHasTag(item, "ew_global_item") then
+                    item_sync.make_item_global(item)
+                else
+                    wand = item_sync.get_global_item_id(item)
                 end
-                has_wand = true
             end
-        end
-        if not has_wand and wands[enemy_id] ~= nil then
-            table.remove(wands, enemy_id)
         end
 
         local effect_data = effect_sync.get_sync_data(enemy_id, true)
@@ -335,9 +277,13 @@ function enemy_sync.host_upload_entities()
             animation = ComponentGetValue2(sprite, "rect_animation")
         end
 
-        local dont_cull = EntityHasTag(enemy_id, "worm") or EntityGetFirstComponent(enemy_id, "BossHealthBarComponent") ~= nil
+        local dont_cull = EntityGetFirstComponent(enemy_id, "BossHealthBarComponent") ~= nil
+                or worm ~= nil
 
-        table.insert(enemy_data_list, {filename, en_data, not_ephemerial, phys_info, phys_info_2, has_wand, effect_data, animation, dont_cull})
+        local stains = stain_sync.get_stains(enemy_id)
+
+        table.insert(enemy_data_list, {filename, en_data, phys_info, wand,
+                                       effect_data, animation, dont_cull, death_triggers, stains})
         ::continue::
     end
 
@@ -379,31 +325,15 @@ function enemy_sync.client_cleanup()
     local entities = get_sync_entities(true)
     for _, enemy_id in ipairs(entities) do
         if not EntityHasTag(enemy_id, "ew_replicated") then
-            --local filename = EntityGetFilename(enemy_id)
-            --print("Despawning unreplicated "..enemy_id.." "..filename)
-            kill(enemy_id)
+            EntityKill(enemy_id)
         elseif not spawned_by_us[enemy_id] then
-            local filename = EntityGetFilename(enemy_id)
-            print("Despawning persisted "..enemy_id.." "..filename)
-            kill(enemy_id)
-        else
-            local cull = EntityGetFirstComponentIncludingDisabled(enemy_id, "VariableStorageComponent", "ew_cull")
-            if cull ~= nil and ComponentGetValue2(cull, "value_int") + 120 < GameGetFrameNum() then
-                kill(enemy_id)
-            end
+            EntityKill(enemy_id)
         end
     end
-    local frame = GameGetFrameNum()
     for remote_id, enemy_data in pairs(ctx.entity_by_remote_id) do
-        if frame - enemy_data.frame > 60*2 then
-            --print("Despawning stale "..remote_id.." "..enemy_data.id)
-            kill(enemy_data.id)
+        if frame > enemy_data.frame then
+            EntityKill(enemy_data.id)
             ctx.entity_by_remote_id[remote_id] = nil
-        end
-    end
-    for _, ent in ipairs(EntityGetWithTag("ew_synced_entity") or {}) do
-        if #(EntityGetAllChildren(ent) or {}) == 0 then
-            EntityKill(ent)
         end
     end
 end
@@ -425,7 +355,7 @@ function enemy_sync.on_world_update_host()
 end
 
 function enemy_sync.on_world_update_client()
-    if GameGetFrameNum() % 20 == 1 then
+    if GameGetFrameNum() % 10 == 1 then
         enemy_sync.client_cleanup()
     end
     if GameGetFrameNum() % (60*60) == 1 then
@@ -438,7 +368,9 @@ local function sync_enemy(enemy_info_raw, force_no_cull)
     filename = constants.interned_index_to_filename[filename] or filename
 
     local en_data = enemy_info_raw[2]
-    local dont_cull = enemy_info_raw[9]
+    local dont_cull = enemy_info_raw[7]
+    local death_triggers = enemy_info_raw[8]
+    local stains = enemy_info_raw[9]
     local remote_enemy_id = en_data.enemy_id
     local x, y = en_data.x, en_data.y
     if not force_no_cull and not dont_cull  then
@@ -451,7 +383,7 @@ local function sync_enemy(enemy_info_raw, force_no_cull)
         local cdx, cdy = c_x - x, c_y - y
         if dx * dx + dy * dy > DISTANCE_LIMIT * DISTANCE_LIMIT and cdx * cdx + cdy * cdy > DISTANCE_LIMIT * DISTANCE_LIMIT then
             if ctx.entity_by_remote_id[remote_enemy_id] ~= nil then
-                kill(ctx.entity_by_remote_id[remote_enemy_id])
+                EntityKill(ctx.entity_by_remote_id[remote_enemy_id].id)
                 ctx.entity_by_remote_id[remote_enemy_id] = nil
             end
             unsynced_enemys[remote_enemy_id] = enemy_info_raw
@@ -467,15 +399,13 @@ local function sync_enemy(enemy_info_raw, force_no_cull)
     if ffi.typeof(en_data) ~= EnemyDataNoMotion then
         vx, vy = en_data.vx, en_data.vy
     end
-    local not_ephemerial = enemy_info_raw[3]
-    local phys_infos = enemy_info_raw[4]
-    local phys_infos_2 = enemy_info_raw[5]
-    local has_wand = enemy_info_raw[6]
-    local effects = enemy_info_raw[7]
-    local animation = enemy_info_raw[8]
+    local phys_infos = enemy_info_raw[3]
+    local gid = enemy_info_raw[4]
+    local effects = enemy_info_raw[5]
+    local animation = enemy_info_raw[6]
     local has_died = filename == nil
 
-    local frame = GameGetFrameNum()
+    local frame_now = GameGetFrameNum()
 
     --[[if confirmed_kills[remote_enemy_id] then
         goto continue
@@ -486,7 +416,7 @@ local function sync_enemy(enemy_info_raw, force_no_cull)
     end
 
     if ctx.entity_by_remote_id[remote_enemy_id] == nil then
-        if filename == nil then
+        if filename == nil or filename == "" or not ModDoesFileExist(filename) then
             goto continue
         end
         times_spawned_last_minute[remote_enemy_id] = (times_spawned_last_minute[remote_enemy_id] or 0) + 1
@@ -497,22 +427,19 @@ local function sync_enemy(enemy_info_raw, force_no_cull)
             goto continue
         end
         local enemy_id
-        if not_ephemerial then
-            enemy_id = EntityLoad(filename, x, y)
-        else
-            enemy_id = util.load_ephemerial(filename, x, y)
-        end
+        enemy_id = EntityLoad(filename, x, y)
         spawned_by_us[enemy_id] = true
         EntityAddTag(enemy_id, "ew_replicated")
         EntityAddTag(enemy_id, "polymorphable_NOT")
         for _, com in ipairs(EntityGetComponent(enemy_id, "LuaComponent") or {}) do
             local script = ComponentGetValue2(com, "script_damage_received")
-            if script ~= nil and (script == "data/scripts/animals/leader_damage.lua" or script == "data/scripts/animals/giantshooter_death.lua" or script == "data/scripts/animals/blob_damage.lua") then
+            if (script ~= nil
+                    and (script == "data/scripts/animals/leader_damage.lua"
+                    or script == "data/scripts/animals/giantshooter_death.lua"
+                    or script == "data/scripts/animals/blob_damage.lua"))
+                    or ComponentGetValue2(com, "script_source_file") == "data/scripts/props/suspended_container_physics_objects.lua" then
                 EntityRemoveComponent(enemy_id, com)
             end
-        end
-        if not dont_cull then
-            EntityAddComponent2(enemy_id, "VariableStorageComponent", {_tags="ew_cull", value_int = GameGetFrameNum()})
         end
         EntityAddComponent2(enemy_id, "LuaComponent", {_tags="ew_immortal", script_damage_about_to_be_received = "mods/quant.ew/files/resource/cbs/immortal.lua"})
         local damage_component = EntityGetFirstComponentIncludingDisabled(enemy_id, "DamageModelComponent")
@@ -525,7 +452,7 @@ local function sync_enemy(enemy_info_raw, force_no_cull)
                 EntityRemoveComponent(enemy_id, ai_component)
             end
         end
-        ctx.entity_by_remote_id[remote_enemy_id] = {id = enemy_id, frame = frame}
+        ctx.entity_by_remote_id[remote_enemy_id] = {id = enemy_id, frame = frame_now}
 
         for _, phys_component in ipairs(EntityGetComponent(enemy_id, "PhysicsBody2Component") or {}) do
             if phys_component ~= nil and phys_component ~= 0 then
@@ -548,51 +475,39 @@ local function sync_enemy(enemy_info_raw, force_no_cull)
             ComponentAddTag(sprite, "ew_sprite")
             ComponentRemoveTag(sprite, "character")
         end
+
+        local ghost = EntityGetFirstComponentIncludingDisabled(enemy_id, "GhostComponent")
+        if ghost ~= nil then
+            ComponentSetValue2(ghost, "die_if_no_home", false)
+        end
+        util.make_ephemerial(enemy_id)
     end
 
     local enemy_data_new = ctx.entity_by_remote_id[remote_enemy_id]
-    enemy_data_new.frame = frame
+    enemy_data_new.frame = frame_now
     local enemy_id = enemy_data_new.id
 
-    if not dont_cull then
-        ComponentSetValue2(EntityGetFirstComponentIncludingDisabled(enemy_id, "VariableStorageComponent", "ew_cull"), "value_int", GameGetFrameNum())
-    end
-
-    for i, phys_component in ipairs(EntityGetComponent(enemy_id, "PhysicsBodyComponent") or {}) do
-        local phys_info = phys_infos[i]
-        if phys_component ~= nil and phys_component ~= 0 and phys_info ~= nil then
-            deserialize_phys_component(phys_component, phys_info)
-        end
-    end
-    for i, phys_component in ipairs(EntityGetComponent(enemy_id, "PhysicsBody2Component") or {}) do
-        local phys_info = phys_infos_2[i]
-        if phys_component ~= nil and phys_component ~= 0 and phys_info ~= nil then
-            -- A physics body doesn't exist otherwise, causing a crash
-            local initialized = ComponentGetValue2(phys_component, "mInitialized")
-            if initialized then
-                deserialize_phys_component(phys_component, phys_info)
+    if not has_died then
+        if not util.set_phys_info(enemy_id, phys_infos) then
+            local character_data = EntityGetFirstComponentIncludingDisabled(enemy_id, "CharacterDataComponent")
+            if character_data ~= nil then
+                ComponentSetValue2(character_data, "mVelocity", vx, vy)
+            end
+            local velocity_data = EntityGetFirstComponentIncludingDisabled(enemy_id, "VelocityComponent")
+            if velocity_data ~= nil then
+                ComponentSetValue2(velocity_data, "mVelocity", vx, vy)
+            end
+            if ffi.typeof(en_data) == EnemyDataFish then
+                EntitySetTransform(enemy_id, x, y, en_data.r / 255 * FULL_TURN)
+            else
+                EntitySetTransform(enemy_id, x, y)
             end
         end
-    end
-
-    if not has_died then
-        local character_data = EntityGetFirstComponentIncludingDisabled(enemy_id, "CharacterDataComponent")
-        if character_data ~= nil then
-            ComponentSetValue2(character_data, "mVelocity", vx, vy)
-        end
-        local velocity_data = EntityGetFirstComponentIncludingDisabled(enemy_id, "VelocityComponent")
-        if velocity_data ~= nil then
-            ComponentSetValue2(velocity_data, "mVelocity", vx, vy)
-        end
-        if ffi.typeof(en_data) == EnemyDataFish then
-            EntitySetTransform(enemy_id, x, y, en_data.r / 255 * FULL_TURN)
-        else
-            EntitySetTransform(enemy_id, x, y)
-        end
         local worm = EntityGetFirstComponentIncludingDisabled(enemy_id, "WormAIComponent")
+            or EntityGetFirstComponentIncludingDisabled(enemy_id, "BossDragonComponent")
         if worm ~= nil and ffi.typeof(en_data) == EnemyDataWorm then
             local tx, ty = en_data.tx, en_data.ty
-            ComponentSetValue2(worm, "mRandomTarget", tx, ty)
+            ComponentSetValue2(worm, "mTargetVec", tx, ty)
         end
         if ffi.typeof(en_data) == EnemyDataKolmi and en_data.enabled then
             local lua_components = EntityGetComponentIncludingDisabled(enemy_id, "LuaComponent") or {}
@@ -602,6 +517,49 @@ local function sync_enemy(enemy_info_raw, force_no_cull)
             EntitySetComponentsWithTagEnabled(enemy_id, "enabled_at_start", false)
             EntitySetComponentsWithTagEnabled(enemy_id, "disabled_at_start", true)
         end
+
+        local indexed = {}
+        for _, com in ipairs(EntityGetComponent(enemy_id, "LuaComponent") or {}) do
+            local script = ComponentGetValue2(com, "script_death")
+            local has = false
+            for _, inx in ipairs(death_triggers) do
+                local script2 = constants.interned_index_to_filename[inx] or inx
+                if script == script2 then
+                    has = true
+                    indexed[script] = true
+                end
+            end
+            if not has then
+                ComponentSetValue2(com, "script_death", "")
+            end
+        end
+        for _, inx in ipairs(death_triggers) do
+            local script = constants.interned_index_to_filename[inx] or inx
+            if indexed[script] == nil then
+                EntityAddComponent(enemy_id, "LuaComponent", { script_death = script,
+                            execute_every_n_frame = "-1"})
+            end
+        end
+        if ffi.typeof(en_data) == EnemyDataMom then
+            local orbs = en_data.orbs
+            for _, child in ipairs(EntityGetAllChildren(enemy_id) or {}) do
+                local var = EntityGetFirstComponentIncludingDisabled(child, "VariableStorageComponent")
+                local damage_component = EntityGetFirstComponentIncludingDisabled(child, "DamageModelComponent")
+                if EntityHasTag(child, "touchmagic_immunity") and var ~= nil then
+                    local n = ComponentGetValue2(var, "value_int")
+                    if orbs[n] then
+                        ComponentSetValue2(damage_component, "wait_for_kill_flag_on_death", true)
+                    else
+                        ComponentSetValue2(damage_component, "wait_for_kill_flag_on_death", false)
+                        EntityKill(child)
+                    end
+                end
+            end
+        end
+        effect_sync.apply_effects(effects, enemy_id, true)
+        if stains ~= nil then
+            stain_sync.sync_stains(stains, enemy_id)
+        end
     end
 
     local inv = EntityGetFirstComponentIncludingDisabled(enemy_id, "Inventory2Component")
@@ -609,13 +567,16 @@ local function sync_enemy(enemy_info_raw, force_no_cull)
     if inv ~= nil then
         item = ComponentGetValue2(inv, "mActualActiveItem")
     end
-    if has_wand and item == nil then
-        if wands[remote_enemy_id] ~= nil then
-            local wand = inventory_helper.deserialize_single_item(wands[remote_enemy_id])
+    if gid ~= nil and (item == nil or item == 0 or not EntityGetIsAlive(item)) then
+        local wand = item_sync.find_by_gid(gid)
+        if wand ~= nil then
             EntityAddTag(wand, "ew_client_item")
             local found = false
             for _, child in ipairs(EntityGetAllChildren(enemy_id) or {}) do
                 if EntityGetName(child) == "inventory_quick" then
+                    if EntityGetParent(wand) ~= nil then
+                        EntityRemoveFromParent(wand)
+                    end
                     EntityAddChild(child, wand)
                     found = true
                     break
@@ -625,6 +586,8 @@ local function sync_enemy(enemy_info_raw, force_no_cull)
                 local inv_quick = EntityCreateNew("inventory_quick")
                 EntityAddChild(enemy_id, inv_quick)
                 EntityAddChild(inv_quick, wand)
+            end
+            if EntityGetFirstComponent(enemy_id, "Inventory2Component") == nil then
                 EntityAddComponent2(enemy_id, "Inventory2Component")
             end
             EntitySetComponentsWithTagEnabled(wand, "enabled_in_world", false)
@@ -632,18 +595,15 @@ local function sync_enemy(enemy_info_raw, force_no_cull)
             EntitySetComponentsWithTagEnabled(wand, "enabled_in_inventory", false)
             np.SetActiveHeldEntity(enemy_id, wand, false, false)
         else
-            rpc.request_wand(ctx.my_id, remote_enemy_id)
+            item_sync.rpc.request_send_again(gid)
         end
     end
-    if not has_wand and wands[remote_enemy_id] ~= nil then
-        table.remove(wands, remote_enemy_id)
-    end
-
-    effect_sync.apply_effects(effects, enemy_id, true)
 
     for _, sprite in pairs(EntityGetComponent(enemy_id, "SpriteComponent", "ew_sprite") or {}) do
-        ComponentSetValue2(sprite, "rect_animation", animation)
-        ComponentSetValue2(sprite, "next_rect_animation", animation)
+        if animation ~= nil then
+            ComponentSetValue2(sprite, "rect_animation", animation)
+            ComponentSetValue2(sprite, "next_rect_animation", animation)
+        end
     end
 
     ::continue::
@@ -699,28 +659,14 @@ function rpc.handle_death_data(death_data)
             end
 
             EntityInflictDamage(enemy_id, 1000000000, "DAMAGE_CURSE", "", "NONE", 0, 0, responsible_entity) -- Just to be sure
-            kill(enemy_id)
-        end
-        if wands[remote_id] ~= nil then
-            table.remove(wands, remote_id)
+            EntityKill(enemy_id)
         end
         ::continue::
     end
 end
 
-function rpc.send_wand(peer_id, remote_enemy_id, wand)
-    if ctx.my_id == peer_id and wand ~= nil then
-        wands[remote_enemy_id] = wand
-    end
-end
-
-function rpc.request_wand(peer_id, remote_enemy_id)
-    if ctx.my_id == ctx.host_id then
-        rpc.send_wand(peer_id, remote_enemy_id, wands[remote_enemy_id])
-    end
-end
-
 function rpc.handle_enemy_data(enemy_data)
+    frame = GameGetFrameNum()
     for _, enemy_info_raw in ipairs(enemy_data) do
         sync_enemy(enemy_info_raw, false)
     end

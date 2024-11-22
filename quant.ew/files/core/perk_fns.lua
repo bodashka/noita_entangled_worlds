@@ -12,13 +12,21 @@ local perks_to_ignore = {
     PERKS_LOTTERY = true,
     REMOVE_FOG_OF_WAR = true,
     MEGA_BEAM_STONE = true,
-    TELEPORTITIS = true,
-    TELEPORTITIS_DODGE = true,
     ALWAYS_CAST = true,
     EXTRA_SLOTS = true,
     EXTRA_PERK = true,
     FASTER_WANDS = true,
     EXTRA_MANA = true,
+    TELEKINESIS = true,
+    HEARTS_MORE_EXTRA_HP = true,
+}
+
+local global_perks = {
+    NO_MORE_SHUFFLE = true,
+    UNLIMITED_SPELLS = true,
+    TRICK_BLOOD_MONEY = true,
+    GOLD_IS_FOREVER = true,
+    PEACE_WITH_GODS = true
 }
 
 function perk_fns.get_my_perks()
@@ -33,6 +41,20 @@ function perk_fns.get_my_perks()
     end
     return perks
 end
+
+local function spawn_perk(perk_info, auto_pickup_entity)
+    local x, y = EntityGetTransform(ctx.my_player.entity)
+    local perk_entity = perk_spawn(x, y - 8, perk_info.id)
+    if auto_pickup_entity then
+        perk_pickup(perk_entity, auto_pickup_entity, nil, true, false)
+    end
+    local icon = EntityCreateNew()
+    EntityAddTag(icon, "perk_entity")
+    EntityAddComponent2(icon, "UIIconComponent", {icon_sprite_file = perk_info.ui_icon, name = perk_info.ui_name, description = perk_info.ui_description})
+    EntityAddChild(ctx.my_player.entity, icon)
+end
+
+local to_spawn = {}
 
 local function give_one_perk(entity_who_picked, perk_info, count)
     lazyload()
@@ -79,6 +101,16 @@ local function give_one_perk(entity_who_picked, perk_info, count)
             EntityAddChild( entity_who_picked, particle_id )
         end
     end
+
+    if global_perks[perk_info.id]
+            and perk_fns.get_my_perks()[perk_info.id] == nil then
+        if not EntityHasTag(ctx.my_player.entity, "ew_notplayer") then
+            spawn_perk(perk_info, true)
+        else
+            table.insert(to_spawn, perk_info)
+        end
+        global_perks[perk_info.id] = false
+    end
 end
 
 function perk_fns.update_perks(perk_data, player_data)
@@ -108,7 +140,6 @@ function perk_fns.update_perks(perk_data, player_data)
     util.set_ent_variable(entity, "ew_current_perks", perk_data)
 end
 
-
 function perk_fns.update_perks_for_entity(perk_data, entity, allow_perk)
     lazyload()
     local current_counts = util.get_ent_variable(entity, "ew_current_perks") or {}
@@ -135,6 +166,16 @@ function perk_fns.update_perks_for_entity(perk_data, entity, allow_perk)
 
     -- This is NOT done here
     -- util.set_ent_variable(entity, "ew_current_perks", perk_data)
+end
+
+function perk_fns.on_world_update()
+    if to_spawn ~= {} and GameGetFrameNum() % 60 == 40
+            and not EntityHasTag(ctx.my_player.entity, "ew_notplayer") then
+        for _, perk_info in ipairs(to_spawn) do
+            spawn_perk(perk_info, true)
+        end
+        to_spawn = {}
+    end
 end
 
 return perk_fns

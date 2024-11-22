@@ -3,6 +3,10 @@ local inventory_helper = dofile_once("mods/quant.ew/files/core/inventory_helper.
 local ctx = dofile_once("mods/quant.ew/files/core/ctx.lua")
 local net = dofile_once("mods/quant.ew/files/core/net.lua")
 
+ModLuaFileAppend("data/scripts/items/utility_box.lua", "mods/quant.ew/files/resource/cbs/chest_sync.lua")
+ModLuaFileAppend("data/scripts/items/chest_random.lua", "mods/quant.ew/files/resource/cbs/chest_sync.lua")
+ModLuaFileAppend("data/scripts/items/chest_random_super.lua", "mods/quant.ew/files/resource/cbs/chest_sync.lua")
+
 dofile_once("data/scripts/lib/coroutines.lua")
 
 local rpc = net.new_rpc_namespace()
@@ -11,6 +15,48 @@ local item_sync = {}
 
 local pending_remove = {}
 local pickup_handlers = {}
+
+local dead_entities = {}
+
+function rpc.open_chest(gid)
+    local ent = item_sync.find_by_gid(gid)
+    if ent ~= nil then
+        local file
+        local name = EntityGetFilename(ent)
+        if name == "data/entities/items/pickup/utility_box.xml" then
+            file = "data/scripts/items/utility_box.lua"
+        elseif name == "data/entities/items/pickup/chest_random_super.xml" then
+            file = "data/scripts/items/chest_random_super.lua"
+        elseif name == "data/entities/items/pickup/chest_random.xml" then
+            file = "data/scripts/items/chest_random.lua"
+        end
+        if file ~= nil then
+            EntityAddComponent2(ent, "LuaComponent", {
+                script_source_file = file,
+                execute_on_added = true,
+                call_init_function = true,
+            })
+        end
+    end
+end
+
+util.add_cross_call("ew_chest_opened", function(chest_id)
+    local gid = item_sync.get_global_item_id(chest_id)
+    if gid ~= "unknown" then
+        rpc.open_chest(gid)
+    end
+end)
+
+util.add_cross_call("ew_item_death_notify", function(enemy_id, responsible_id)
+    local player_data = player_fns.get_player_data_by_local_entity_id(responsible_id)
+    local responsible
+    if player_data ~= nil then
+        responsible = player_data.peer_id
+    else
+        responsible = responsible_id
+    end
+    table.insert(dead_entities, {item_sync.get_global_item_id(enemy_id), responsible})
+end)
 
 function item_sync.ensure_notify_component(ent)
     local notify = EntityGetFirstComponentIncludingDisabled(ent, "LuaComponent", "ew_notify_component")
@@ -27,7 +73,9 @@ end
 local function mark_in_inventory(my_player)
     local items = inventory_helper.get_all_inventory_items(my_player)
     for _, ent in pairs(items) do
-        item_sync.ensure_notify_component(ent)
+        if not EntityHasTag(ent, "polymorphed_player") then
+            item_sync.ensure_notify_component(ent)
+        end
     end
 end
 
@@ -75,8 +123,12 @@ end
 
 local find_by_gid_cache = {}
 function item_sync.find_by_gid(gid)
-    if find_by_gid_cache[gid] ~= nil and EntityGetIsAlive(find_by_gid_cache[gid]) then
-        return find_by_gid_cache[gid]
+    if find_by_gid_cache[gid] ~= nil then
+        if EntityGetIsAlive(find_by_gid_cache[gid]) and EntityHasTag(find_by_gid_cache[gid], "ew_global_item") then
+            return find_by_gid_cache[gid]
+        else
+            find_by_gid_cache[gid] = nil
+        end
     end
 
     --print("find_by_gid: searching")
@@ -103,19 +155,20 @@ function item_sync.remove_item_with_id_now(gid)
                 end
             end
             EntityKill(item)
+            break
         end
     end
 end
 
 function item_sync.host_localize_item(gid, peer_id)
     if ctx.item_prevent_localize[gid] then
-        GamePrint("Item localize for " .. gid .. " prevented")
+        print("Item localize for " .. gid .. " prevented")
         return
     end
     ctx.item_prevent_localize[gid] = true
 
     if table.contains(pending_remove, gid) then
-        GamePrint("Item localize prevented, already taken")
+        print("Item localize prevented, already taken")
         return
     end
 
@@ -131,6 +184,8 @@ function item_sync.host_localize_item(gid, peer_id)
     rpc.item_localize(peer_id, gid)
 end
 
+local wait_for_gid = {}
+
 function item_sync.make_item_global(item, instant, give_authority_to)
     EntityAddTag(item, "ew_global_item")
     async(function()
@@ -143,7 +198,7 @@ function item_sync.make_item_global(item, instant, give_authority_to)
         end
         item_sync.ensure_notify_component(item)
         local gid_component = EntityGetFirstComponentIncludingDisabled(item, "VariableStorageComponent",
-            "ew_global_item_id")
+                "ew_global_item_id")
         local gid
         if gid_component == nil then
             gid = allocate_global_id()
@@ -161,8 +216,25 @@ function item_sync.make_item_global(item, instant, give_authority_to)
         --if vel then
         --    local vx, vy = ComponentGetValue2(vel, "mVelocity")
         --end
+
         local item_data = inventory_helper.serialize_single_item(item)
         item_data.gid = gid
+
+        local hp, max_hp, has_hp = util.get_ent_health(item)
+        if has_hp then
+            util.ensure_component_present(item, "LuaComponent", "ew_item_death_notify", {
+                script_death = "mods/quant.ew/files/resource/cbs/item_death_notify.lua"
+            })
+        end
+
+        if give_authority_to ~= nil then
+            local itemcom = EntityGetFirstComponentIncludingDisabled(item, "ItemComponent")
+            if ComponentGetValue2(itemcom, "play_hover_animation") then
+                ComponentSetValue2(itemcom, "play_hover_animation", false)
+                ComponentSetValue2(itemcom, "play_spinning_animation", false)
+            end
+        end
+
         ctx.item_prevent_localize[gid] = false
         rpc.item_globalize(item_data)
     end)
@@ -191,13 +263,68 @@ local function is_my_item(gid)
     return string.sub(gid, 1, 16) == ctx.my_id
 end
 
+rpc.opts_reliable()
+function rpc.handle_death_data(death_data)
+    for _, remote_data in ipairs(death_data) do
+        local remote_id = remote_data[1]
+        --[[if confirmed_kills[remote_id] then
+            GamePrint("Remote id has been killed already..?")
+            goto continue
+        end
+        confirmed_kills[remote_id] = true]]
+        local responsible_entity = 0
+        local peer_data = player_fns.peer_get_player_data(remote_data[2], true)
+        if peer_data ~= nil then
+            responsible_entity = peer_data.entity
+        elseif ctx.entity_by_remote_id[remote_data[2]] ~= nil then
+            responsible_entity = ctx.entity_by_remote_id[remote_data[2]]
+        end
+
+        --if unsynced_enemys[remote_id] ~= nil then
+            --sync_enemy(unsynced_enemys[remote_id], true)
+        --end
+        local enemy_id = item_sync.find_by_gid(remote_id)
+        if enemy_id ~= nil and EntityGetIsAlive(enemy_id) then
+            local immortal = EntityGetFirstComponentIncludingDisabled(enemy_id, "LuaComponent", "ew_immortal")
+            if immortal ~= 0 then
+                EntityRemoveComponent(enemy_id, immortal)
+            end
+            local protection_component_id = GameGetGameEffect(enemy_id, "PROTECTION_ALL")
+            if protection_component_id ~= 0 then
+                EntitySetComponentIsEnabled(enemy_id, protection_component_id, false)
+            end
+
+            local damage_component = EntityGetFirstComponentIncludingDisabled(enemy_id, "DamageModelComponent")
+            if damage_component and damage_component ~= 0 then
+                ComponentSetValue2(damage_component, "wait_for_kill_flag_on_death", false)
+            end
+
+            -- Enable explosion back
+            local expl_component = EntityGetFirstComponent(enemy_id, "ExplodeOnDamageComponent")
+            if expl_component ~= nil and expl_component ~= 0 then
+                ComponentSetValue2(expl_component, "explode_on_death_percent", 1)
+            end
+
+            local current_hp = util.get_ent_health(enemy_id)
+            local dmg = current_hp
+            if dmg > 0 then
+                EntityInflictDamage(enemy_id, dmg+0.1, "DAMAGE_CURSE", "", "NONE", 0, 0, responsible_entity)
+            end
+
+            EntityInflictDamage(enemy_id, 1000000000, "DAMAGE_CURSE", "", "NONE", 0, 0, responsible_entity) -- Just to be sure
+            EntityKill(enemy_id)
+        end
+        ::continue::
+    end
+end
+
 local function send_item_positions()
     local position_data = {}
     for _, item in ipairs(EntityGetWithTag("ew_global_item")) do
         local gid = item_sync.get_global_item_id(item)
         -- Only send info about items created by us.
         if is_my_item(gid) and is_item_on_ground(item) then
-            local x, y = EntityGetTransform(item)
+            local x, y, r = EntityGetTransform(item)
             local costcom = EntityGetFirstComponentIncludingDisabled(item, "ItemCostComponent")
             local cost = 0
             if costcom ~= nil then
@@ -207,10 +334,17 @@ local function send_item_positions()
                     ComponentSetValue2(costcom, "stealable", true)
                 end
             end
-            position_data[gid] = {x, y, cost}
+            local phys_info = util.get_phys_info(item, true)
+            if phys_info ~= nil then
+                position_data[gid] = {x, y, r, phys_info, cost}
+            end
         end
     end
     rpc.update_positions(position_data)
+    if #dead_entities > 0 then
+        rpc.handle_death_data(dead_entities)
+    end
+    dead_entities = {}
 end
 
 function item_sync.on_world_update_host()
@@ -223,7 +357,8 @@ function item_sync.on_world_update_host()
         item_sync.make_item_global(thrown_item)
     end
     local picked_item = get_global_ent("ew_picked")
-    if picked_item ~= nil and EntityHasTag(picked_item, "ew_global_item") then
+    if picked_item ~= nil and EntityHasTag(picked_item, "ew_global_item")
+            and EntityHasTag(EntityGetRootEntity(picked_item), "ew_peer") then
         local gid = item_sync.get_global_item_id(picked_item)
         item_sync.host_localize_item(gid, ctx.my_id)
     end
@@ -241,7 +376,8 @@ function item_sync.on_world_update_client()
     end
 
     local picked_item = get_global_ent("ew_picked")
-    if picked_item ~= nil and EntityHasTag(picked_item, "ew_global_item") then
+    if picked_item ~= nil and EntityHasTag(picked_item, "ew_global_item")
+            and EntityHasTag(EntityGetRootEntity(picked_item), "ew_peer") then
         local gid = item_sync.get_global_item_id(picked_item)
         rpc.item_localize_req(gid)
     end
@@ -260,7 +396,16 @@ function item_sync.on_world_update()
             item_sync.remove_item_with_id_now(gid)
         end
     end
-    if GameGetFrameNum() % 60 == 31 then
+    if GameGetFrameNum() % 5 == 2 then
+        for _, ent in ipairs(EntityGetWithTag("mimic_potion")) do
+            if ctx.is_host and not EntityHasTag(ent, "polymorphed_player") then
+                if not EntityHasTag(ent, "ew_global_item") then
+                    item_sync.make_item_global(ent)
+                end
+            end
+        end
+    end
+    if GameGetFrameNum() % 5 == 3 then
         send_item_positions()
     end
 end
@@ -272,7 +417,7 @@ function item_sync.on_should_send_updates()
     local global_items = EntityGetWithTag("ew_global_item")
     local item_list = {}
     for _, item in ipairs(global_items) do
-        if is_item_on_ground(item) then
+        if is_item_on_ground(item) and not EntityHasTag(item, "mimic_potion") then
             local item_data = inventory_helper.serialize_single_item(item)
             local gid = item_sync.get_global_item_id(item)
             item_data.gid = gid
@@ -341,11 +486,34 @@ end
 
 rpc.opts_reliable()
 function rpc.item_globalize(item_data)
+    wait_for_gid[item_data.gid] = nil
     if is_safe_to_remove() then
         item_sync.remove_item_with_id_now(item_data.gid)
     end
+    local n = item_sync.find_by_gid(item_data.gid)
+    if n ~= nil and EntityGetRootEntity(n) == n then
+        return
+    end
     local item = inventory_helper.deserialize_single_item(item_data)
     add_stuff_to_globalized_item(item, item_data.gid)
+    local coms = EntityGetComponent(item, "VariableStorageComponent")
+    for _, com in ipairs(coms) do
+        if ComponentGetValue2(com, "name") == "throw_time" then
+            ComponentSetValue2(com, "value_int", GameGetFrameNum())
+        end
+    end
+    local damage_component = EntityGetFirstComponentIncludingDisabled(item, "DamageModelComponent")
+    if damage_component and damage_component ~= 0 then
+        ComponentSetValue2(damage_component, "wait_for_kill_flag_on_death", true)
+        EntityAddComponent2(item, "LuaComponent", {_tags="ew_immortal", script_damage_about_to_be_received = "mods/quant.ew/files/resource/cbs/immortal.lua"})
+    end
+    if not is_my_item(item_data.gid) then
+        local itemcom = EntityGetFirstComponentIncludingDisabled(item, "ItemComponent")
+        if ComponentGetValue2(itemcom, "play_hover_animation") then
+            ComponentSetValue2(itemcom, "play_hover_animation", false)
+            ComponentSetValue2(itemcom, "play_spinning_animation", false)
+        end
+    end
 end
 
 rpc.opts_reliable()
@@ -373,12 +541,15 @@ function rpc.update_positions(position_data)
     local LIMIT = 128 * 3
     local cx, cy = GameGetCameraPos()
     for gid, el in pairs(position_data) do
-        local x, y = el[1], el[2]
-        local price = el[3]
+        local x, y, r = el[1], el[2], el[3]
+        local phys_info = el[4]
+        local price = el[5]
         if math.abs(x - cx) < LIMIT and math.abs(y - cy) < LIMIT then
             local item = item_sync.find_by_gid(gid)
             if item ~= nil then
-                EntitySetTransform(item, x, y)
+                if not util.set_phys_info(item, phys_info) then
+                    EntitySetTransform(item, x, y, r)
+                end
                 local costcom = EntityGetFirstComponentIncludingDisabled(item, "ItemCostComponent")
                 if costcom ~= nil then
                     if price == 0 then
@@ -391,7 +562,10 @@ function rpc.update_positions(position_data)
                 end
             else
                 util.log("Requesting again "..gid)
-                rpc.request_send_again(gid)
+                if wait_for_gid[gid] == nil then
+                    rpc.request_send_again(gid)
+                    wait_for_gid[gid] = true
+                end
             end
         end
     end
@@ -415,5 +589,7 @@ ctx.cap.item_sync = {
         table.insert(pickup_handlers, handler)
     end
 }
+
+item_sync.rpc = rpc
 
 return item_sync

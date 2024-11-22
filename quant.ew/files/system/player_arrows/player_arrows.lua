@@ -42,7 +42,9 @@ function module.on_world_update()
     local gui_id = 2
 
     for peer_id, player_data in pairs(ctx.players) do
-        if ctx.my_id == peer_id and (ctx.spectating_over_peer_id == nil or ctx.spectating_over_peer_id == peer_id) then
+        if (ctx.my_id == peer_id
+                and (ctx.spectating_over_peer_id == nil or ctx.spectating_over_peer_id == peer_id))
+                    or EntityHasTag(player_data.entity, "polymorphed_cessation") then
             goto continue
         end
         local px, py = EntityGetTransform(player_data.entity)
@@ -101,7 +103,7 @@ function module.on_world_update()
         if okay_to_display then
             local is_host = ctx.host_id == player_data.peer_id
             local is_notplayer = false
-            if player_data.status and not player_data.status.is_alive then
+            if EntityHasTag(player_data.entity, "ew_notplayer") then
                 is_notplayer = true
             end
             if not is_notplayer and EntityGetIsAlive(player_data.entity) and EntityHasTag(player_data.entity, "polymorphed_player") then

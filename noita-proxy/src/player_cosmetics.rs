@@ -5,7 +5,6 @@ use bitcode::{Decode, Encode};
 use eframe::egui;
 use eframe::egui::color_picker::{color_picker_color32, Alpha};
 use eframe::egui::{Color32, TextureHandle, TextureOptions, Ui};
-use eframe::epaint::Hsva;
 use image::{Rgba, RgbaImage};
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -51,19 +50,27 @@ pub fn replace_color(image: &mut RgbaImage, main: Rgba<u8>, alt: Rgba<u8>, arm: 
     }
 }
 
+fn f_to_u(n: f64) -> u8 {
+    255.0_f64.min(0.0_f64.max(n.round())) as u8
+}
+
+fn to_u8(c: [f64; 4]) -> [u8; 4] {
+    [f_to_u(c[0]), f_to_u(c[1]), f_to_u(c[2]), f_to_u(c[3])]
+}
+
 pub fn make_player_image(image: &mut RgbaImage, colors: PlayerColor) {
     let target_main = Rgba::from([155, 111, 154, 255]);
     let target_alt = Rgba::from([127, 84, 118, 255]);
     let target_arm = Rgba::from([89, 67, 84, 255]);
-    let main = Rgba::from(colors.player_main);
-    let alt = Rgba::from(colors.player_alt);
-    let arm = Rgba::from(colors.player_arm);
-    let cape = Rgba::from(colors.player_cape);
-    let cape_edge = Rgba::from(colors.player_cape_edge);
-    let forearm = Rgba::from(colors.player_forearm);
+    let main = Rgba::from(to_u8(colors.player_main));
+    let alt = Rgba::from(to_u8(colors.player_alt));
+    let arm = Rgba::from(to_u8(colors.player_arm));
+    let cape = Rgba::from(to_u8(colors.player_cape));
+    let cape_edge = Rgba::from(to_u8(colors.player_cape_edge));
+    let forearm = Rgba::from(to_u8(colors.player_forearm));
     for (i, pixel) in image.pixels_mut().enumerate() {
         if *pixel == target_main {
-            *pixel = main;
+            *pixel = main
         } else if *pixel == target_alt {
             *pixel = alt
         } else if *pixel == target_arm {
@@ -112,13 +119,56 @@ pub fn add_cosmetics(
     }
 }
 
-pub fn shift_hue(diff: f32, color: &mut [u8; 4]) {
-    let rgb = Color32::from_rgb(color[0], color[1], color[2]);
-    let mut hsv = Hsva::from(rgb);
-    hsv.h += diff / 360.0;
-    hsv.h = hsv.h.fract();
-    let rgb = hsv.to_srgb();
-    *color = [rgb[0], rgb[1], rgb[2], 255];
+pub fn get_lch(color: [f64; 4]) -> (f64, f64, f64) {
+    let c = (color[1].powi(2) + color[2].powi(2)).sqrt();
+    let h = color[2].atan2(color[1]);
+    (color[0], c, h)
+}
+
+pub fn rgb_to_oklch(color: &mut [f64; 4]) {
+    let mut l = 0.4122214694707629 * color[0] + 0.5363325372617349 * color[1] + 0.0514459932675022 * color[2];
+    let mut m = 0.2119034958178251 * color[0] + 0.6806995506452344 * color[1] + 0.1073969535369405 * color[2];
+    let mut s = 0.0883024591900564 * color[0] + 0.2817188391361215 * color[1] + 0.6299787016738222 * color[2];
+
+    l = l.cbrt();
+    m = m.cbrt();
+    s = s.cbrt();
+
+    color[0] = 0.210454268309314  * l + 0.7936177747023054 * m - 0.0040720430116193 * s;
+    color[1] = 1.9779985324311684 * l - 2.42859224204858   * m + 0.450593709617411  * s;
+    color[2] = 0.0259040424655478 * l + 0.7827717124575296 * m - 0.8086757549230774 * s;
+}
+
+fn oklch_to_rgb(color: &mut [f64; 4]) {
+    let mut l = color[0] + 0.3963377773761749 * color[1] + 0.2158037573099136 * color[2];
+    let mut m = color[0] - 0.1055613458156586 * color[1] - 0.0638541728258133 * color[2];
+    let mut s = color[0] - 0.0894841775298119 * color[1] - 1.2914855480194092 * color[2];
+
+    l = l.powi(3);
+    m = m.powi(3);
+    s = s.powi(3);
+
+    color[0] =  4.07674163607596   * l - 3.3077115392580635 * m + 0.2309699031821046 * s;
+    color[1] = -1.2684379732850317 * l + 2.6097573492876887 * m - 0.3413193760026572 * s;
+    color[2] = -0.0041960761386754 * l - 0.7034186179359363 * m + 1.7076146940746116 * s;
+}
+
+fn shift_hue_by(color: &mut [f64; 4], diff: f64) {
+    let tau = std::f64::consts::TAU;
+    let diff = tau * diff / 360.0;
+    let (_, c, hue) = get_lch(*color);
+    let mut new_hue = (hue + diff) % tau;
+    if new_hue.is_sign_negative() {
+        new_hue += tau;
+    }
+    color[1] = c * new_hue.cos();
+    color[2] = c * new_hue.sin();
+}
+
+pub fn shift_hue(diff: f64, color: &mut [f64; 4]) {
+    rgb_to_oklch(color);
+    shift_hue_by(color, diff);
+    oklch_to_rgb(color);
 }
 
 pub fn player_skin_display_color_picker(
@@ -149,10 +199,11 @@ pub fn player_skin_display_color_picker(
     }
 }
 
-pub fn color_picker(ui: &mut Ui, color: &mut [u8; 4]) {
-    let mut rgb = Color32::from_rgb(color[0], color[1], color[2]);
-    color_picker_color32(ui, &mut rgb, Alpha::Opaque);
-    *color = [rgb.r(), rgb.g(), rgb.b(), 255]
+pub fn color_picker(ui: &mut Ui, color: &mut [f64; 4]) {
+    let mut rgb = Color32::from_rgb(f_to_u(color[0]), f_to_u(color[1]), f_to_u(color[2]));
+    if color_picker_color32(ui, &mut rgb, Alpha::Opaque) {
+        *color = [rgb.r() as f64, rgb.g() as f64, rgb.b() as f64, 255.0]
+    }
 }
 
 pub fn player_select_current_color_slot(ui: &mut Ui, app: &mut App) {
@@ -258,30 +309,30 @@ pub fn create_player_png(
     let mut img = image::open(player_path).unwrap().into_rgba8();
     replace_color(
         &mut img,
-        Rgba::from(rgb.player_main),
-        Rgba::from(rgb.player_alt),
-        Rgba::from(rgb.player_arm),
+        Rgba::from(to_u8(rgb.player_main)),
+        Rgba::from(to_u8(rgb.player_alt)),
+        Rgba::from(to_u8(rgb.player_arm)),
     );
     let mut img_arrow = image::open(arrows_path).unwrap().into_rgba8();
     replace_color(
         &mut img_arrow,
-        Rgba::from(rgb.player_main),
-        Rgba::from(rgb.player_alt),
-        Rgba::from(rgb.player_arm),
+        Rgba::from(to_u8(rgb.player_main)),
+        Rgba::from(to_u8(rgb.player_alt)),
+        Rgba::from(to_u8(rgb.player_arm)),
     );
     let mut img_ping = image::open(ping_path).unwrap().into_rgba8();
     replace_color(
         &mut img_ping,
-        Rgba::from(rgb.player_main),
-        Rgba::from(rgb.player_alt),
-        Rgba::from(rgb.player_arm),
+        Rgba::from(to_u8(rgb.player_main)),
+        Rgba::from(to_u8(rgb.player_alt)),
+        Rgba::from(to_u8(rgb.player_arm)),
     );
     let mut img_cursor = image::open(cursor_path).unwrap().into_rgba8();
     replace_color(
         &mut img_cursor,
-        Rgba::from(rgb.player_main),
-        Rgba::from(rgb.player_alt),
-        Rgba::from(rgb.player_arm),
+        Rgba::from(to_u8(rgb.player_main)),
+        Rgba::from(to_u8(rgb.player_alt)),
+        Rgba::from(to_u8(rgb.player_arm)),
     );
     let path = tmp_path.join(format!("tmp/{}.png", id));
     img.save(path).unwrap();
@@ -291,7 +342,7 @@ pub fn create_player_png(
     img_ping.save(path).unwrap();
     let path = tmp_path.join(format!("tmp/{}_cursor.png", id));
     img_cursor.save(path).unwrap();
-    let img = create_arm(Rgba::from(rgb.player_forearm));
+    let img = create_arm(Rgba::from(to_u8(rgb.player_forearm)));
     let path = tmp_path.join(format!("tmp/{}_arm.png", id));
     img.save(path).unwrap();
     edit_nth_line(
@@ -301,10 +352,10 @@ pub fn create_player_png(
             .into_os_string(),
         vec![16, 16],
         vec![
-            format!("cloth_color=\"0xFF{}\"", rgb_to_hex(rgb.player_cape)),
+            format!("cloth_color=\"0xFF{}\"", rgb_to_hex(to_u8(rgb.player_cape))),
             format!(
                 "cloth_color_edge=\"0xFF{}\"",
-                rgb_to_hex(rgb.player_cape_edge)
+                rgb_to_hex(to_u8(rgb.player_cape_edge))
             ),
         ],
     );

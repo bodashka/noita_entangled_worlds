@@ -7,6 +7,8 @@ local tether_length_2 = tether_length + 128
 
 local module = {}
 
+local ignore_tower = false
+
 function is_in_box(x1, x2, y1, y2, x, y)
     return x1 < x and x < x2 and y1 < y and y < y2
 end
@@ -161,11 +163,24 @@ local function set_tether_length(length, entity)
     end
 end
 
+local function float()
+    local character_data = EntityGetFirstComponentIncludingDisabled(ctx.my_player.entity, "CharacterDataComponent")
+    ComponentSetValue2(character_data, "mVelocity", 0, -80)
+end
+
 function rpc.teleport_to_tower()
+    if ignore_tower then
+        return
+    end
+    local x2, y2 = EntityGetTransform(ctx.my_player.entity)
+    if is_in_box(9200, 11000, 8300, 9800, x2, y2) then
+        return
+    end
     async(function()
         EntitySetTransform(ctx.my_player.entity, 9740, 9100)
         wait(30)
         EntitySetTransform(ctx.my_player.entity, 9740, 9100)
+        float()
     end)
 end
 
@@ -175,14 +190,47 @@ local was_not_hm = false
 
 local was_notplayer = false
 
-function module.on_world_update_client()
+function module.on_world_update()
     if GameGetFrameNum() % 10 == 7 then
+        local host_playerdata = player_fns.peer_get_player_data(ctx.host_id, true)
+        if ctx.proxy_opt.perma_death and (not ctx.my_player.status.is_alive or not host_playerdata.is_alive) then
+            return
+        end
+        local x2, y2 = EntityGetTransform(ctx.my_player.entity)
+        if is_in_box(9200, 11000, 4000, 8300, x2, y2) then
+            ignore_tower = true
+        end
+        if np.GetGameModeNr() ~= 2
+                and tonumber(SessionNumbersGetValue("NEW_GAME_PLUS_COUNT")) == 0
+                and is_in_box(9200, 11000, 8300, 9800, x2, y2) then
+            local any_not = false
+            for _, player in pairs(ctx.players) do
+                local x, y = EntityGetTransform(player.entity)
+                if not is_in_box(9200, 11000, 4000, 9800, x, y) then
+                    any_not = true
+                end
+                if is_in_box(0, 1000, -2000, 0, x, y) then
+                    async(function()
+                        EntitySetTransform(ctx.my_player.entity, 770, 900)
+                        wait(30)
+                        EntitySetTransform(ctx.my_player.entity, 770, 900)
+                        float()
+                    end)
+                    return
+                end
+            end
+            if any_not then
+                rpc.teleport_to_tower()
+            end
+            return
+        end
         if ctx.my_id == ctx.host_id then
             return
         end
-        local host_playerdata = player_fns.peer_get_player_data(ctx.host_id, true)
-        local x1, y1 = EntityGetTransform(host_playerdata.entity)
-        local x2, y2 = EntityGetTransform(ctx.my_player.entity)
+        if host_playerdata == nil or host_playerdata.entity == nil or not EntityGetIsAlive(host_playerdata.entity) then
+            return
+        end
+        local x1, y1 = host_playerdata.pos_x, host_playerdata.pos_y
         if x1 == nil or x2 == nil then
             return
         end
@@ -204,25 +252,15 @@ function module.on_world_update_client()
             end
             return
         end
-        if is_in_box(9200, 11000, 8300, 9800, x2, y2) then
-            local any_not = false
-            for _, player in pairs(ctx.players) do
-                local x, y = EntityGetTransform(player.entity)
-                if not (is_in_box(9200, 11000, 8300, 9800, x, y) or is_in_box(-4740, 4140, 8700, 13880, x, y)) then
-                    any_not = true
-                end
-            end
-            if not any_not then
-                rpc.teleport_to_tower()
-            end
-            return
-        end
         local dx = x1-x2
         local dy = y1-y2
         local dist_sq = dx*dx + dy*dy
         local not_actual_hm, not_hm = not_in_hm(x1, y1)
         local _, i_not_in_hm = not_in_hm(x2, y2)
-        if x1 ~= nil and x2 ~= nil and (not_hm or (not not_actual_hm and y1 < y2)) and i_not_in_hm then
+        local host_mx, host_my = host_playerdata.mouse_x, host_playerdata.mouse_y
+        local dxm, dym = host_mx - x2, host_my - y2
+        if x1 ~= nil and x2 ~= nil and (not_hm or (not not_actual_hm and y1 < y2)) and i_not_in_hm
+                and dxm * dxm + dym * dym > tether_length * tether_length / 2 then
             if no_tether then
                 tether_enable(true, host_playerdata.entity)
                 no_tether = false
@@ -241,6 +279,7 @@ function module.on_world_update_client()
                     EntitySetTransform(ctx.my_player.entity, x, y)
                     wait(40)
                     EntitySetTransform(ctx.my_player.entity, x, y)
+                    float()
                 end)
             elseif tether_length_3 > tether_length_2 then
                 tether_length_3 = math.max(math.min(tether_length_3, math.sqrt(dist_sq) + 256), tether_length_2)

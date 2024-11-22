@@ -100,6 +100,7 @@ function rpc.try_kill(x, y)
             end
         end
     end)
+    GamePrintImportant(ctx.rpc_player_data.name .. " wins")
 end
 
 local function remove_fire(entity)
@@ -138,7 +139,12 @@ local function remove_game_effects()
     end
 end
 
+local stop_fully = false
+
 function end_fight.on_world_update()
+    if stop_fully then
+        return
+    end
     if GameHasFlagRun("ending_game_completed") then
         if not done then
             if kill_walls == GameGetFrameNum() then
@@ -150,6 +156,10 @@ function end_fight.on_world_update()
                 end
             end
             if init == -1 then
+                local x, y = EntityGetTransform(ctx.my_player.entity)
+                if is_in_box(5632, 7168, 14336, 15872, x, y) then
+                    stop_fully = true
+                end
                 np.MagicNumbersSetValue("STREAMING_CHUNK_TARGET", 6)
                 if EntityHasTag(ctx.my_player.entity, "ew_notplayer") then
                     remove_game_effects()

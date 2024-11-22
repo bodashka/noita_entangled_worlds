@@ -181,13 +181,20 @@ util.load_ents_tags = util.cached_fn(function(path)
     return tags
 end)
 
+function util.make_ephemerial(ent)
+    if ent ~= nil and EntityGetIsAlive(ent) then
+        ewext.make_ephemerial(ent)
+    end
+end
+
 -- Load an entity that doesn't get saved.
 function util.load_ephemerial(path, x, y)
-    local entity = EntityCreateNew()
-    EntityAddTag(entity, "ew_synced_entity")
-    EntitySetTransform(entity, x, y)
+    --local entity = EntityCreateNew()
+    --EntityAddTag(entity, "ew_synced_entity")
+    --EntitySetTransform(entity, x, y)
     local ent_2 = EntityLoad(path, x, y)
-    EntityAddChild(entity, ent_2)
+    --EntityAddChild(entity, ent_2)
+    util.make_ephemerial(ent_2)
     return ent_2
 end
 
@@ -271,8 +278,12 @@ function util.make_type(typedata)
         inner = inner .. "bool "..var..";\n"
     end
 
-    for _, var in ipairs(typedata.string or {}) do
-        inner = inner .. "const char* "..var..";\n"
+    for _, var in ipairs(typedata.vecbool or {}) do
+        inner = inner .. "bool "..var.."[16];\n"
+    end
+
+    for _, var in ipairs(typedata.peer_id or {}) do
+        inner = inner .. "char "..var.."[16];\n"
     end
 
     ffi.cdef([[
@@ -290,14 +301,19 @@ function util.log(...)
     if ctx.proxy_opt.debug then
         GamePrint(...)
     end
+    print(...)
 end
 
 function util.serialize_entity(ent)
     -- Serialized entities usually get sent to other clients, and it's a very bad idea to try and send them another WorldState.
-    if EntityHasTag(ent, "world_state") or EntityGetFirstComponentIncludingDisabled(ent, "WorldStateComponent") ~= nil then
+    if util.is_world_state_entity_like(ent) then
         error("Tried to serialize WorldStateEntity")
     end
     return np.SerializeEntity(ent)
+end
+
+function util.is_world_state_entity_like(ent)
+    return EntityHasTag(ent, "world_state") or EntityGetFirstComponentIncludingDisabled(ent, "WorldStateComponent") ~= nil
 end
 
 function util.deserialize_entity(ent_data, x, y)
@@ -308,10 +324,132 @@ function util.deserialize_entity(ent_data, x, y)
         np.DeserializeEntity(ent, ent_data, x, y)
     end
     if EntityGetFirstComponentIncludingDisabled(ent, "WorldStateComponent") ~= nil then
-        error("Tried to deserialize WorldStateEntity. The world is screwed.")
+        print("Tried to deserialize WorldStateEntity. The world is screwed.")
         EntityKill(ent)
     end
     return ent
+end
+
+local cross_calls = {}
+
+function util.add_cross_call(name, fn)
+    np.CrossCallAdd(name, fn)
+    cross_calls[name] = fn
+end
+
+function CrossCall(name, ...)
+    cross_calls[name](...)
+end
+
+util.add_cross_call("ew_host_frame_num", function()
+    if ctx.my_id == ctx.host_id then
+        return GameGetFrameNum()
+    else
+        return ctx.host_frame_num
+    end
+end)
+
+local FULL_TURN = math.pi * 2
+
+local PhysData = util.make_type({
+    f32 = {"x", "y", "vx", "vy", "vr"},
+    -- We should be able to cram rotation into 1 byte.
+    u8 = {"r"}
+})
+
+-- Variant of PhysData for when we don't have any motion.
+local PhysDataNoMotion = util.make_type({
+    f32 = {"x", "y"},
+    -- We should be able to cram rotation into 1 byte.
+    u8 = {"r"}
+})
+
+local function serialize_phys_component(phys_component)
+    local px, py, pr, pvx, pvy, pvr = np.PhysBodyGetTransform(phys_component)
+    px, py = PhysicsPosToGamePos(px, py)
+    if math.abs(pvx) < 0.01 and math.abs(pvy) < 0.01 and math.abs(pvr) < 0.01 then
+        return PhysDataNoMotion {
+            x = px,
+            y = py,
+            r = math.floor((pr % FULL_TURN) / FULL_TURN * 255),
+        }
+    else
+        return PhysData {
+            x = px,
+            y = py,
+            r = math.floor((pr % FULL_TURN) / FULL_TURN * 255),
+            vx = pvx,
+            vy = pvy,
+            vr = pvr,
+        }
+    end
+end
+
+local function deserialize_phys_component(phys_component, phys_info)
+    local x, y = GamePosToPhysicsPos(phys_info.x, phys_info.y)
+    if ffi.typeof(phys_info) == PhysDataNoMotion then
+        np.PhysBodySetTransform(phys_component, x, y, phys_info.r / 255 * FULL_TURN, 0, 0, 0)
+    else
+        np.PhysBodySetTransform(phys_component, x, y, phys_info.r / 255 * FULL_TURN, phys_info.vx, phys_info.vy, phys_info.vr)
+    end
+end
+
+function util.get_phys_info(entity, kill)
+    local phys_info = {}
+    local phys_info_2 = {}
+    for _, phys_component in ipairs(EntityGetComponent(entity, "PhysicsBodyComponent") or {}) do
+        if phys_component ~= nil and phys_component ~= 0 then
+            local ret, info = pcall(serialize_phys_component, phys_component)
+            if not ret and kill then
+                GamePrint("Physics component has no body, deleting entity")
+                EntityKill(entity)
+                return nil
+            end
+            table.insert(phys_info, info)
+        end
+    end
+
+    for _, phys_component in ipairs(EntityGetComponent(entity, "PhysicsBody2Component") or {}) do
+        if phys_component ~= nil and phys_component ~= 0 then
+            local initialized = ComponentGetValue2(phys_component, "mInitialized")
+            if initialized then
+                local ret, info = pcall(serialize_phys_component, phys_component)
+                if not ret and kill then
+                    GamePrint("Physics component has no body, deleting entity")
+                    EntityKill(entity)
+                    return nil
+                end
+                table.insert(phys_info_2, info)
+            else
+                table.insert(phys_info_2, nil)
+            end
+        end
+    end
+    return {phys_info, phys_info_2}
+end
+
+function util.set_phys_info(entity, data)
+    local phys_infos, phys_infos_2 = data[1], data[2]
+    local has_set = false
+    for i, phys_component in ipairs(EntityGetComponent(entity, "PhysicsBodyComponent") or {}) do
+        local phys_info = phys_infos[i]
+        if phys_component ~= nil and phys_component ~= 0 and phys_info ~= nil then
+            deserialize_phys_component(phys_component, phys_info)
+            has_set = true
+        end
+    end
+    for i, phys_component in ipairs(EntityGetComponent(entity, "PhysicsBody2Component") or {}) do
+        local phys_info = phys_infos_2[i]
+        if phys_component ~= nil and phys_component ~= 0 and phys_info ~= nil then
+            -- A physics body doesn't exist otherwise, causing a crash
+            local initialized = ComponentGetValue2(phys_component, "mInitialized")
+            if initialized then
+                deserialize_phys_component(phys_component, phys_info)
+                has_set = true
+            end
+        end
+    end
+    return has_set
 end
 
 return util

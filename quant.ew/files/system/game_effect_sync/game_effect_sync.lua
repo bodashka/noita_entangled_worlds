@@ -12,6 +12,13 @@ local IGNORE_EFFECTS = {
     NO_WAND_EDITING = true,
 }
 
+local REMOVE_EFFECTS = {
+    POLYMORPH = true,
+    POLYMORPH_RANDOM = true,
+    POLYMORPH_CESSATION = true,
+    POLYMORPH_UNSTABLE = true,
+}
+
 function effect_sync.get_ent_effects(entity, perks)
     local filename = EntityGetFilename(entity)
     local list = {}
@@ -25,6 +32,10 @@ function effect_sync.get_ent_effects(entity, perks)
                 local name = ComponentGetValue2(com, "effect")
                 if not IGNORE_EFFECTS[name] and filename ~= EntityGetFilename(ent) and (not EntityHasTag(ent, "perk_entity") or perks) then
                     table.insert(list, ent)
+                elseif REMOVE_EFFECTS[name]
+                        and ctx.my_player.entity ~= entity
+                        and (ctx.my_id ~= ctx.host_id or player_fns.get_player_data_by_local_entity_id(entity) ~= nil) then
+                    EntityKill(ent)
                 end
             end
         end
@@ -61,7 +72,7 @@ function effect_sync.get_sync_data(entity, perks)
 end
 
 function effect_sync.on_world_update()
-    if GameGetFrameNum() % 30 == 9 then
+    if GameGetFrameNum() % 15 == 9 then
         local sync_data = effect_sync.get_sync_data(ctx.my_player.entity, false)
         rpc.send_effects(sync_data, false)
     end

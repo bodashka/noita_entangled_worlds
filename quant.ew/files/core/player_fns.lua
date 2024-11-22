@@ -381,7 +381,9 @@ local player_fns = {
             projectile_seed_chain = {}, -- TODO clean
             currently_polymorphed = false,
             mouse_x = 0,
+            pos_x = 0,
             mouse_y = 0,
+            pos_y = 0,
             mutations = {ghost = false, luuki = false, rat = false, fungus = false, halo = 0}
         }
     end,
@@ -401,6 +403,9 @@ function player_fns.serialize_position(player_data)
     end
     local vel_x, vel_y = ComponentGetValue2(character_data, "mVelocity")
 
+    player_data.pos_x = x
+    player_data.pos_y = y
+
     local c = CharacterPos{
         frames_in_air = ComponentGetValue2(character_platforming_comp, "mFramesInAirCounter"),
         x = x,
@@ -410,10 +415,13 @@ function player_fns.serialize_position(player_data)
         is_on_ground = ComponentGetValue2(character_data, "is_on_ground"),
         is_on_slippery_ground = ComponentGetValue2(character_data, "is_on_slippery_ground"),
     }
-    return c
+    return c, util.get_phys_info(entity, false)
 end
 
-function player_fns.deserialize_position(message, player_data)
+function player_fns.deserialize_position(message, phys_infos, player_data)
+    player_data.pos_x = message.x
+    player_data.pos_y = message.y
+
     if player_data == nil or not EntityGetIsAlive(player_data.entity) then
         return
     end
@@ -433,9 +441,10 @@ function player_fns.deserialize_position(message, player_data)
 
     ComponentSetValue2(velocity_comp, "gravity_y", 0)
 
-    ComponentSetValue2(character_data, "mVelocity", message.vel_x, message.vel_y)
-
-    EntityApplyTransform(entity, message.x, message.y)
+    if not util.set_phys_info(entity, phys_infos) then
+        ComponentSetValue2(character_data, "mVelocity", message.vel_x, message.vel_y)
+        EntityApplyTransform(entity, message.x, message.y)
+    end
 end
 
 
@@ -468,6 +477,9 @@ function player_fns.nickname_of_peer(peer_id)
 end
 
 function player_fns.get_player_data_by_local_entity_id(entity)
+    if entity == nil then
+        return nil
+    end
     return ctx.player_data_by_local_entity[entity]
 end
 
@@ -480,6 +492,7 @@ function player_fns.spawn_player_for(peer_id, x, y, existing_playerdata)
     end
     print("Spawning player for "..peer_id)
     local new = EntityLoad("mods/quant.ew/files/system/player/tmp/" .. peer_id .. "_base.xml", x, y)
+    util.make_ephemerial(new)
     local inv_full = EntityCreateNew("inventory_full")
     EntityAddChild(new, inv_full)
     LoadGameEffectEntityTo(new, "mods/quant.ew/files/system/spectate/no_tinker.xml")
@@ -528,10 +541,16 @@ function player_fns.spawn_player_for(peer_id, x, y, existing_playerdata)
 end
 
 function player_fns.replace_player_entity(new_entity, player_data)
+    if player_data.entity ~= ctx.my_player.entity then
+        util.make_ephemerial(new_entity)
+    end
     if new_entity ~= nil then
         local old_entity = player_data.entity
         player_data.entity = new_entity
         ctx.player_data_by_local_entity[new_entity] = player_data
+        if EntityGetFirstComponentIncludingDisabled(new_entity, "StreamingKeepAliveComponent") == nil then
+            EntityAddComponent2(new_entity, "StreamingKeepAliveComponent")
+        end
         print("Replaced player entity: "..old_entity.." -> "..new_entity)
     else
         player_fns.spawn_player_for(player_data.peer_id, 0, 0, player_data)

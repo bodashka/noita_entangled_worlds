@@ -36,11 +36,11 @@ ModLuaFileAppend("data/scripts/gun/gun_actions.lua", "mods/quant.ew/files/resour
 
 ModMagicNumbersFileAdd("mods/quant.ew/files/magic.xml")
 
-np.CrossCallAdd("ew_per_peer_seed", function()
+util.add_cross_call("ew_per_peer_seed", function()
     return tonumber(string.sub(ctx.my_id, 8, 12), 16), tonumber(string.sub(ctx.my_id, 12), 16)
 end)
 
-np.CrossCallAdd("ew_spectator", function()
+util.add_cross_call("ew_spectator", function()
     if ctx.spectating_over_peer_id == nil then
         return ctx.my_player.entity or EntityGetWithTag("player_unit")[1]
     else
@@ -122,6 +122,10 @@ local function load_modules()
     ctx.load_system("gate_boss")
     ctx.load_system("tapion")
     ctx.load_system("world_sync_cuts")
+    ctx.load_system("hamis")
+    ctx.load_system("spell_refresh")
+    ctx.load_system("shiny_orb")
+    ctx.load_system("potion_mimic")
 end
 
 local function load_extra_modules()
@@ -170,6 +174,12 @@ function OnProjectileFired(shooter_id, projectile_id, initial_rng, position_x, p
         end
     end
     shooter_player_data.projectile_seed_chain[projectile_id] = rng
+    for _, lua in ipairs(EntityGetComponent(projectile_id, "LuaComponent") or {}) do
+        if ComponentGetValue2(lua, "script_source_file") == "data/scripts/projectiles/transmutation.lua" then
+            EntityAddComponent2(projectile_id, "VariableStorageComponent", {name = "ew_transmutation", value_int = rng})
+            break
+        end
+    end
     np.SetProjectileSpreadRNG(rng)
 end
 
@@ -235,7 +245,9 @@ function OnPlayerSpawned( player_entity ) -- This runs when player entity has be
     net.send_welcome()
 
     local item_pick = EntityGetFirstComponentIncludingDisabled(player_entity, "ItemPickUpperComponent")
-    ComponentSetValue2(item_pick, "is_immune_to_kicks", true)
+    if item_pick ~= nil then
+        ComponentSetValue2(item_pick, "is_immune_to_kicks", true)
+    end
 
     ctx.hook.on_local_player_spawn(my_player)
     ctx.hook.on_should_send_updates()
@@ -336,6 +348,7 @@ local function on_world_pre_update_inner()
         end
     end
 
+    perk_fns.on_world_update()
     wake_up_waiting_threads(1)
 end
 

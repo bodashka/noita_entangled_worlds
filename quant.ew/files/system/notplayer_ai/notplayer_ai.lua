@@ -5,6 +5,8 @@ local spectate = dofile_once("mods/quant.ew/files/system/spectate/spectate.lua")
 
 local MAX_RADIUS = 128*5
 
+local INVIS_RANGE = 64
+
 local state
 
 local module = {}
@@ -14,10 +16,6 @@ local no_shoot_time = 100
 local throw_water = false
 
 local changed_held = false
-
-local function log(...)
-    -- GamePrint(...)
-end
 
 local bad_mats = {"magic_liquid_random_polymorph",
                   "magic_liquid_polymorph",
@@ -39,7 +37,7 @@ local bad_mats = {"magic_liquid_random_polymorph",
 --                "magic_liquid_teleportation",
 --                "magic_liquid_unstable_teleportation",
                   "beer",
---                "alcohol",
+                  "alcohol",
                   "sima",
                   "blood_cold",
                   "juhannussima",
@@ -62,7 +60,7 @@ local water_mats = {"water", "swamp", "water_swamp", "water_salt", "blood", "mud
 local ignore_spell = {"ANTIHEAL", "BLACK_HOLE", "BLACK_HOLE_DEATH_TRIGGER", "POWERDIGGER", "DIGGER", "PIPE_BOMB", "PIPE_BOMB_DEATH_TRIGGER", "GRENADE_LARGE", "CRUMBLING_EARTH", "HEAL_BULLET", "FISH",
                       "TELEPORT_PROJECTILE_CLOSER", "TELEPORT_PROJECTILE_STATIC", "SWAPPER_PROJECTILE", "TELEPORT_PROJECTILE", "TELEPORT_PROJECTILE_SHORT", "WHITE_HOLE", "CESSATION", "ADD_TRIGGER",
                       "ADD_TIMER", "ADD_DEATH_TRIGGER", "DIVIDE_2", "DIVIDE_3", "DIVIDE_4", "DIVIDE_10", "GAMMA", "MU", "ALPHA", "OMEGA", "PHI", "SIGMA", "TAU", "SUMMON_PORTAL", "DUPLICATE",
-                      "IF_PROJECTILE", "IF_HP", "IF_ENEMY", "IF_HALF", "IF_ELSE", "IF_END", "ALL_SPELLS", "SUMMON_ROCK", "SUMMON_EGG"}
+                      "IF_PROJECTILE", "IF_HP", "IF_ENEMY", "IF_HALF", "IF_ELSE", "IF_END", "ALL_SPELLS", "SUMMON_ROCK", "SUMMON_EGG", "SUMMON_HOLLOW_EGG", "PEBBLE", "COMMON_GRUB"}
 
 local function get_potions_of_type(type)
     local potions = {}
@@ -147,11 +145,25 @@ end
 
 local do_kick
 
+local function combine_tables(a, b)
+    if b == nil then
+        return a
+    end
+    local c = {}
+    for _, v in ipairs(a) do
+        table.insert(c, v)
+    end
+    for _, v in ipairs(b) do
+        table.insert(c, v)
+    end
+    return c
+end
+
 local function find_new_wand()
     local children = EntityGetAllChildren(state.attack_wand)
     if children == nil then
         table.insert(state.empty_wands, state.attack_wand)
-        state.attack_wand = wandfinder.find_attack_wand(state.empty_wands)
+        state.attack_wand = wandfinder.find_attack_wand(combine_tables(state.empty_wands, state.bad_wands[state.target or 1]))
         changed_held = true
     else
         local bad_mod = false
@@ -159,6 +171,19 @@ local function find_new_wand()
         for _, child in pairs(children or {}) do
             local is_proj = false
             local is_bad_proj = false
+            if not state.is_electric_immune
+                    and ComponentGetValue2(state.damage_model, "mLiquidCount") > 10 and
+                    (EntityGetFirstComponent(child, "ElectricChargeComponent") ~= nil
+                    or EntityGetFirstComponent(child, "ElectricitySourceComponent") ~= nil) then
+                if state.bad_wands[state.target or 1] == nil then
+                    state.bad_wands[state.target or 1] = {}
+                end
+                table.insert(state.bad_wands[state.target or 1], state.attack_wand)
+                table.insert(state.empty_wands, state.attack_wand)
+                state.attack_wand = wandfinder.find_attack_wand(combine_tables(state.empty_wands, state.bad_wands[state.target or 1]))
+                changed_held = true
+                return
+            end
             local sprites = EntityGetComponentIncludingDisabled(child, "SpriteComponent")
             for _, sprite in pairs(sprites) do
                 local image = ComponentGetValue2(sprite, "image_file")
@@ -198,7 +223,7 @@ local function find_new_wand()
         end
         if not is_any_not_empty then
             table.insert(state.empty_wands, state.attack_wand)
-            state.attack_wand = wandfinder.find_attack_wand(state.empty_wands)
+            state.attack_wand = wandfinder.find_attack_wand(combine_tables(state.empty_wands, state.bad_wands[state.target or 1]))
             changed_held = true
         end
     end
@@ -284,16 +309,6 @@ local function is_frozen(entity)
     return frozen
 end
 
-
-local bad_potion
-local good_potion
-local water_potion
-
-local dont_throw = true
-local stop_potion = false
-
-local bathe = false
-
 local function arc_potion(world_x, world_y)
     local arm = EntityGetAllChildren(ctx.my_player.entity, "player_arm_r")[1]
     local ch_x, ch_y = EntityGetHotspot(arm, "hand", true)
@@ -310,9 +325,9 @@ local function arc_potion(world_x, world_y)
     local lhs = v*v/(g*dx)
     local interior = v*v*v*v - g*g*dx*dx - 2*g*dy*v*v
     if interior < 0 then
-        dont_throw = true
-        bad_potion = nil
-        stop_potion = true
+        state.dont_throw = true
+        state.bad_potion = nil
+        state.stop_potion = true
         return
     end
     local rhs = math.sqrt(interior)/(g*dx)
@@ -362,19 +377,19 @@ end
 
 
 local function aim_at(world_x, world_y)
-    if good_potion ~= nil then
+    if state.good_potion ~= nil then
         ComponentSetValue2(state.control_component, "mAimingVector", 0, 312)
         ComponentSetValue2(state.control_component, "mAimingVectorNormalized", 0, 1)
         ComponentSetValue2(state.control_component, "mMousePosition", world_x, world_y)
         return
-    elseif water_potion ~= nil and not throw_water then
+    elseif state.water_potion ~= nil and not throw_water then
         ComponentSetValue2(state.control_component, "mAimingVector", 0, -312)
         ComponentSetValue2(state.control_component, "mAimingVectorNormalized", 0, -1)
         ComponentSetValue2(state.control_component, "mMousePosition", world_x, world_y)
         return
     end
 
-    if bad_potion ~= nil or throw_water then
+    if state.bad_potion ~= nil or throw_water then
         arc_potion(world_x, world_y)
     else
         local arm = EntityGetAllChildren(ctx.my_player.entity, "player_arm_r")[1]
@@ -398,8 +413,7 @@ local throw = false
 
 local function fire_wand(enable)
     if state.is_pheremoned ~= -120 then
-        local damage = EntityGetFirstComponent(ctx.my_player.entity, "DamageModelComponent")
-        if state.is_pheremoned >= ComponentGetValue2(damage, "mLastDamageFrame") then
+        if state.is_pheremoned >= ComponentGetValue2(state.damage_model, "mLastDamageFrame") then
             if has_pheremoned(ctx.my_player.entity) then
                 enable = false
             else
@@ -410,10 +424,10 @@ local function fire_wand(enable)
             state.is_pheremoned = 0
         end
     end
-    if bad_potion ~= nil or good_potion ~= nil or throw_water then
+    if state.bad_potion ~= nil or state.good_potion ~= nil or throw_water then
         ComponentSetValue2(state.control_component, "mButtonDownFire", false)
         ComponentSetValue2(state.control_component, "mButtonDownFire2", false)
-        if dont_throw then
+        if state.dont_throw then
             return
         end
         ComponentSetValue2(state.control_component, "mButtonDownRightClick", true)
@@ -424,7 +438,7 @@ local function fire_wand(enable)
         end
         throw = true
     else
-        if water_potion ~= nil then
+        if state.water_potion ~= nil then
             aim_at(0, 0)
             enable = true
         end
@@ -444,9 +458,33 @@ local function fire_wand(enable)
 end
 
 local function init_state()
+    EntityAddTag(ctx.my_player.entity, "teleportable")
+    EntityAddComponent2(ctx.my_player.entity, "SpriteComponent", {
+        _tags = "aiming_reticle",
+        alpha = 1,
+        image_file = "data/ui_gfx/mouse_cursor.png",
+        ui_is_parent = false,
+        offset_x = 6,
+        offset_y = 35,
+        has_special_scale = true,
+        special_scale_x = 1,
+        special_scale_y = 1,
+        z_index = -10000,
+        emissive = true,
+    })
+    local damage_model = EntityGetFirstComponentIncludingDisabled(ctx.my_player.entity, "DamageModelComponent")
+    if ctx.proxy_opt.no_material_damage then
+        ComponentSetValue2(damage_model, "materials_damage", false)
+        LoadGameEffectEntityTo(ctx.my_player.entity, "data/entities/misc/effect_protection_fire.xml")
+        LoadGameEffectEntityTo(ctx.my_player.entity, "data/entities/misc/effect_protection_radioactivity.xml")
+        LoadGameEffectEntityTo(ctx.my_player.entity, "data/entities/misc/effect_breath_underwater.xml")
+        LoadGameEffectEntityTo(ctx.my_player.entity, "data/entities/misc/effect_stun_protection_electricity.xml")
+        LoadGameEffectEntityTo(ctx.my_player.entity, "data/entities/misc/effect_stun_protection_freeze.xml")
+    end
     local children = EntityGetAllChildren(ctx.my_player.entity)
     local items
     local attack_foot = false
+    local has_electric = false
     for _, child in pairs(children or {}) do
         if EntityGetName(child) == "inventory_quick" then
             items = child
@@ -455,9 +493,12 @@ local function init_state()
             attack_foot = true
         end
         local com = EntityGetFirstComponentIncludingDisabled(child, "GameEffectComponent")
-        if com ~= nil or EntityHasTag(child, "projectile") then
+        if com ~= nil then
             if ComponentGetValue2(com, "effect") == "CHARM" then
                 EntityKill(child)
+            end
+            if ComponentGetValue2(com, "effect") == "PROTECTION_ELECTRICITY" then
+                has_electric = true
             end
         end
     end
@@ -467,17 +508,30 @@ local function init_state()
         entity = ctx.my_player.entity,
         control_component = EntityGetFirstComponentIncludingDisabled(ctx.my_player.entity, "ControlsComponent"),
         inv_component = EntityGetFirstComponentIncludingDisabled(ctx.my_player.entity, "InventoryGuiComponent"),
+        inv2_component = EntityGetFirstComponentIncludingDisabled(ctx.my_player.entity, "Inventory2Component"),
         data_component = EntityGetFirstComponentIncludingDisabled(ctx.my_player.entity, "CharacterDataComponent"),
+        damage_model = damage_model,
         items = items,
+        is_electric_immune = has_electric,
+        expected_held = nil,
+
+        dont_throw = true,
+        stop_potion = false,
+        bathe = false,
 
         bad_potions = get_potions_of_type(bad_mats),
         good_potions = get_potions_of_type(good_mats),
         water_potions = get_potions_of_type(water_mats),
+        bad_potion = nil,
+        good_potion = nil,
+        water_potion = nil,
 
         had_potion = false,
 
         attack_wand = wandfinder.find_attack_wand({}),
         empty_wands = {},
+        bad_wands = {},
+        good_wands = {},
 
         is_pheremoned = -120,
         aim_up = false,
@@ -497,7 +551,22 @@ local function init_state()
 
         has_attack_foot = attack_foot,
 
-        dtype = 0
+        dtype = 0,
+
+        target = nil,
+        target_hp = {-1, -1},
+
+        last_length = nil,
+
+        last_did_hit = true,
+
+        ignore = {}, --moving projectiles
+
+        stationary_check = {}, --projectiles that may be stationary
+
+        stay_away = {}, --tries to stay 64 pixels away from these set of points
+
+        herd_id = ComponentGetValue2(genome, "herd_id")
     }
     EntityAddComponent2(ctx.my_player.entity, "LuaComponent", {
         script_damage_received = "mods/quant.ew/files/system/notplayer_ai/damage_tracker.lua"
@@ -509,30 +578,26 @@ local function init_state()
     })
 end
 
-local target
-
-local last_length
-
-local last_did_hit = true
-
 local function is_suitable_target(entity)
-    return EntityGetIsAlive(entity) and not EntityHasTag(entity,"ew_notplayer")
+    return EntityGetIsAlive(entity)
+            and not EntityHasTag(entity, "ew_notplayer")
+            and EntityHasTag(entity, "mortal")
 end
 
 local function choose_wand_actions()
-    if (state.attack_wand ~= nil or bad_potion ~= nil) and target ~= nil and EntityGetIsAlive(target) then
-        local t_x, t_y = EntityGetFirstHitboxCenter(target)
+    if (state.attack_wand ~= nil or state.bad_potion ~= nil) and state.target ~= nil and EntityGetIsAlive(state.target) then
+        local t_x, t_y = EntityGetFirstHitboxCenter(state.target)
         if t_x == nil then
-            t_x, t_y = EntityGetTransform(target)
+            t_x, t_y = EntityGetTransform(state.target)
         end
         if state.aim_up then
             t_y = t_y - 7
         elseif state.aim_down then
             t_y = t_y + 7
         end
-        dont_throw = false
+        state.dont_throw = false
         aim_at(t_x, t_y)
-        fire_wand(not last_did_hit and state.init_timer > no_shoot_time and not changed_held)-- or has_water_potion)
+        fire_wand(not state.last_did_hit and state.init_timer > no_shoot_time and not changed_held)-- or has_water_potion)
         if changed_held then
             changed_held = false
         end
@@ -573,7 +638,9 @@ local function choose_movement()
         ComponentSetValue2(state.control_component, "mButtonFrameRight", GameGetFrameNum()+100)
         return
     end
-    if target == nil or (has_ambrosia(ctx.my_player.entity) and state.init_timer > no_shoot_time + 4) then
+    local air = ComponentGetValue2(state.damage_model, "air_in_lungs")
+    local fly = ComponentGetValue2(state.data_component, "mFlyingTimeLeft")
+    if state.target == nil or (has_ambrosia(ctx.my_player.entity) and state.init_timer > no_shoot_time + 4) then
         state.control_a = false
         state.control_d = false
         state.control_w = false
@@ -581,8 +648,8 @@ local function choose_movement()
         stop_y = false
         swap_side = false
         on_right = false
-        local damage_model = EntityGetFirstComponentIncludingDisabled(ctx.my_player.entity, "DamageModelComponent")
-        local start = (state.dtype == 32 or state.init_timer < 100) and ComponentGetValue2(damage_model, "mLiquidCount") ~= 0
+        local start = (state.dtype == 32 or state.init_timer < no_shoot_time) and ComponentGetValue2(state.damage_model, "mLiquidCount") ~= 0
+        state.dtype = 0
         if start or move > GameGetFrameNum() then
             if start then
                 move = GameGetFrameNum() + 120
@@ -598,13 +665,23 @@ local function choose_movement()
         else
             move = -1
         end
+
+        if air < 2 then
+            if fly < 0.5 then
+                state.control_s = true
+                state.control_w = false
+            else
+                state.control_w = true
+                state.control_s = false
+            end
+        end
         return
     end
     if state.attack_foot then
         stop_y = false
         rest = false
     end
-    local t_x, t_y = EntityGetTransform(target)
+    local t_x, t_y = EntityGetTransform(state.target)
     local dist = my_x - t_x
     local LIM = give_space
     if swap_side and (on_right ~= (my_x > t_x) or GameGetFrameNum() % 300 == 299) then
@@ -615,7 +692,7 @@ local function choose_movement()
         LIM = 0
         give_space = 100
     end
-    local is_froze = is_frozen(target)
+    local is_froze = is_frozen(state.target)
     if is_froze then
         give_space = 5
     end
@@ -626,13 +703,13 @@ local function choose_movement()
         state.control_d = -dist > LIM
         state.control_a = not state.control_d
     end
-    if (not stop_y) and ((last_did_hit and t_y < my_y + 80) or t_y < my_y) and (GameGetFrameNum() % 300) < 200 then
+    if (not stop_y) and ((state.last_did_hit and t_y < my_y + 80) or t_y < my_y) and (GameGetFrameNum() % 300) < 200 then
         state.control_w = true
         local did_hit, _, _ = RaytracePlatforms(my_x, my_y, my_x, my_y - 12)
         if did_hit then
             state.control_w = false
             stop_y = true
-            local did_hit_down, _, _ = RaytracePlatforms(my_x, my_y, my_x, my_y + 12)
+            did_hit_down, _, _ = RaytracePlatforms(my_x, my_y, my_x, my_y + 12)
             if did_hit_down then
                 if give_space == 100 then
                     give_space = math.abs(dist)
@@ -649,7 +726,7 @@ local function choose_movement()
         state.control_w = (GameGetFrameNum() % 60) > 45
     end
 
-    if last_did_hit and t_y < my_y + 40 then
+    if state.last_did_hit and t_y < my_y + 40 then
         local did_hit_1, _, _ = RaytracePlatforms(my_x, my_y, t_x, my_y)
         local did_hit_2, _, _ = RaytracePlatforms(t_x, my_y, t_x, t_y)
         if did_hit_1 and (not did_hit_2) then
@@ -679,7 +756,7 @@ local function choose_movement()
         on_right = my_x > t_x
     end
 
-    if ComponentGetValue2(state.data_component, "mFlyingTimeLeft") < 0.2 and GameGetFrameNum() % 300 > 250 then
+    if fly < 0.2 and GameGetFrameNum() % 300 > 250 then
         rest = true
         give_space = give_space + 10
         swap_side = false
@@ -690,28 +767,69 @@ local function choose_movement()
     if rest or stop_y then
         state.control_w = false
     end
-    if bathe then
+    if state.bathe then
         state.control_a = false
         state.control_d = false
     end
-    if GameGetFrameNum() % 20 == 0 and not last_did_hit then
+    if GameGetFrameNum() % 20 == 0 and not state.last_did_hit then
         if give_space > 50 then
             give_space = give_space - 10
         else
             give_space = 100
         end
     end
-    --GamePrint(state.dtype)
-    local damage_model = EntityGetFirstComponentIncludingDisabled(ctx.my_player.entity, "DamageModelComponent")
-    if ComponentGetValue2(damage_model, "mLiquidCount") == 0 then
-        if state.dtype == 32 or material_gas > GameGetFrameNum() then
-            material_gas = GameGetFrameNum() + 30
-            if (dist > 0 and did_hit_2) or (dist < 0 and did_hit_1) then
-                give_space = give_space + 10
-            else
-                swap_side = true
+
+    local closest = {500 * 500, 500, 500}
+    for i = #state.stay_away, 1, -1 do
+        local pos = state.stay_away[i]
+        local x, y = pos[1], pos[2]
+        if (pos[3] ~= nil and not EntityGetIsAlive(pos[3]))
+                or (pos[4] ~= nil and pos[4] < GameGetFrameNum()) then
+            table.remove(state.stay_away, i)
+        else
+            local pdx, pdy = x - my_x, y - my_y
+            local r = pdx * pdx + pdy * pdy
+            if r < closest[1] then
+                closest = {r, pdx, pdy}
             end
+        end
+    end
+    local pdx, pdy = closest[2], closest[3]
+    if math.abs(pdy) < 60 and math.abs(pdx) < 55 then
+        if pdx < 0 then
+            state.control_d = true
+            state.control_a = false
+        else
+            state.control_a = true
+            state.control_d = false
+        end
+        if pdy < 0 then
             state.control_w = false
+        else
+            state.control_w = true
+        end
+    end
+
+    if ComponentGetValue2(state.damage_model, "mLiquidCount") == 0 then
+        if state.dtype == 32 or material_gas > GameGetFrameNum() then
+            local did_hit_down_10, _, _ = RaytracePlatforms(my_x, my_y, my_x, my_y + 10)
+            if did_hit_down_10 then
+                local did_hit_3, _, _ = RaytracePlatforms(my_x, my_y, my_x + 100, my_y)
+                if not did_hit_3 then
+                    table.insert(state.stay_away, {my_x - 8, my_y + 8, nil, GameGetFrameNum() + 1200})
+                else
+                    table.insert(state.stay_away, {my_x + 8, my_y + 8, nil, GameGetFrameNum() + 1200})
+                end
+            else
+                table.insert(state.stay_away, {my_x, my_y - 8, nil, GameGetFrameNum() + 1200})
+                material_gas = GameGetFrameNum() + 30
+                if (dist > 0 and did_hit_2) or (dist < 0 and did_hit_1) then
+                    give_space = give_space + 10
+                else
+                    swap_side = true
+                end
+                state.control_w = false
+            end
         else
             material_gas = -1
             if move > GameGetFrameNum() then
@@ -727,7 +845,8 @@ local function choose_movement()
                 move = -1
             end
         end
-    elseif state.dtype == 32 or state.init_timer < 100 then
+    elseif state.dtype == 32 or state.init_timer < no_shoot_time then
+        table.insert(state.stay_away, {my_x, my_y + 8, nil, GameGetFrameNum() + 1200})
         move = GameGetFrameNum() + 120
         state.control_w = true
         if my_x > t_x then
@@ -749,11 +868,27 @@ local function choose_movement()
     else
         move = -1
     end
+    state.dtype = 0
     if is_froze and math.abs(dist) < 10 then
         state.control_w = false
     end
     local did_hit_up, _, _ = RaytracePlatforms(my_x, my_y, my_x, my_y - 40)
     state.control_s = did_hit_up
+    if did_hit_up and state.water_potion ~= nil then
+        state.control_w = false
+    end
+    if air < 2 then
+        if fly < 0.5 then
+            state.control_s = true
+            state.control_w = false
+        else
+            state.control_w = true
+            state.control_s = false
+        end
+    end
+    if fly < 0.1 then
+        state.control_w = false
+    end
 end
 
 local function teleport_to_area(area)
@@ -854,6 +989,11 @@ local function teleport_to_next_hm()
     end
 end
 
+local function float()
+    local character_data = EntityGetFirstComponentIncludingDisabled(ctx.my_player.entity, "CharacterDataComponent")
+    ComponentSetValue2(character_data, "mVelocity", 0, -40)
+end
+
 local function teleport_outside_cursed()
     --17370 < x < 18470
     --53210 < x
@@ -866,7 +1006,12 @@ local function teleport_outside_cursed()
     local x, _ = EntityGetTransform(ctx.my_player.entity)
     local how_far_right = (x - (17370+550)) % 35840
     if how_far_right <= 550 or how_far_right >= (35840 - 550) then
-        EntitySetTransform(ctx.my_player.entity, 14074, -820)
+        async(function()
+            EntitySetTransform(ctx.my_player.entity, 14074, -820)
+            wait(30)
+            EntitySetTransform(ctx.my_player.entity, 14074, -820)
+            float()
+        end)
     end
 end
 
@@ -879,77 +1024,81 @@ local function hold_something()
     local holding = ComponentGetValue2(inventory, "mActualActiveItem")
     local i = 1
     local tablet = false
-    if target ~= nil and EntityHasTag(target, "polymorphed") then
+    if state.target ~= nil then
+        local polied = EntityHasTag(state.target, "polymorphed")
+        local damage = EntityGetFirstComponentIncludingDisabled(state.target, "DamageModelComponent")
+        local in_water = ComponentGetValue2(damage, "mLiquidCount") > 20
         for j, item in ipairs(state.bad_potions) do
-            if EntityHasTag(item, "normal_tablet") then
+            if polied and EntityHasTag(item, "normal_tablet") then
+                i = j
+                tablet = true
+                break
+            elseif in_water and EntityHasTag(item, "thunderstone") then
                 i = j
                 tablet = true
                 break
             end
         end
     end
-    local can_not_tablet=false
-    if not tablet then
-        for j, item in ipairs(state.bad_potions) do
-            if not EntityHasTag(item, "normal_tablet") then
-                i = j
-                can_not_tablet = true
-                break
-            end
-        end
-    end
-    if bad_potion ~= nil and (holding == nil or holding ~= bad_potion) then
+    if state.bad_potion ~= nil and (holding == nil or holding ~= state.bad_potion) then
         table.remove(state.bad_potions, i)
-        bad_potion = nil
-        stop_potion = true
+        state.bad_potion = nil
+        state.stop_potion = true
         changed_held = true
     end
-    if good_potion ~= nil and (holding == nil or holding ~= good_potion) then
+    if state.good_potion ~= nil and (holding == nil or holding ~= state.good_potion) then
         table.remove(state.good_potions, 1)
-        good_potion = nil
-        stop_potion = true
-        bathe = true
+        state.good_potion = nil
+        state.stop_potion = true
+        state.bathe = true
         changed_held = true
     end
     local douse = needs_douse(ctx.my_player.entity)
-    local target_is_ambrosia = has_ambrosia(target) and not last_did_hit
+    local target_is_ambrosia = has_ambrosia(state.target) and not state.last_did_hit
     if state.water_potions[1] == nil or not is_potion_of_type(state.water_potions[1], water_mats) then
         table.remove(state.water_potions, 1)
-        if water_potion ~= nil then
-            water_potion = nil
+        if state.water_potion ~= nil then
+            state.water_potion = nil
             throw_water = false
-            bathe = false
+            state.bathe = false
             changed_held = true
         end
     end
-    if water_potion ~= nil and (((state.init_timer >= no_shoot_time and not last_did_hit) or not douse) or (holding == nil or holding ~= water_potion) or (throw_water and not target_is_ambrosia)) then
-        water_potion = nil
+    if state.water_potion ~= nil and (((state.init_timer >= no_shoot_time and not state.last_did_hit) or not douse) or (holding == nil or holding ~= state.water_potion) or (throw_water and not target_is_ambrosia)) then
+        state.water_potion = nil
         throw_water = false
-        bathe = false
+        state.bathe = false
         changed_held = true
     end
 
     if GameGetFrameNum() % 120 == 40 then
-        bathe = false
+        state.bathe = false
     end
 
     if GameGetFrameNum() % 120 == 60 then
-        stop_potion = false
+        state.stop_potion = false
     end
     local ground_below, _, _ = RaytracePlatforms(ch_x, ch_y, ch_x, ch_y + 40)
     local is_ambrosia = has_ambrosia(ctx.my_player.entity)
-    local damage_model = EntityGetFirstComponentIncludingDisabled(ctx.my_player.entity, "DamageModelComponent")
     local can_hold_potion = state.dtype ~= 32
-    if ComponentGetValue2(damage_model, "mLiquidCount") == 0 then
+    if ComponentGetValue2(state.damage_model, "mLiquidCount") == 0 then
         can_hold_potion = true
     elseif state.init_timer < 100 then
         can_hold_potion = false
     end
 
-    local has_water_potion = can_hold_potion and (not is_ambrosia or target_is_ambrosia) and #state.water_potions ~= 0 and (douse or target_is_ambrosia) and (state.init_timer < no_shoot_time or last_did_hit or target_is_ambrosia)
-    local has_bad_potion = can_hold_potion and not has_water_potion and not is_ambrosia and #state.bad_potions ~= 0 and not last_did_hit and ((GameGetFrameNum() % 120 > 100 and state.init_timer > 120 and not stop_potion) or tablet)
-    local has_good_potion = can_hold_potion and not has_water_potion and not is_ambrosia and #state.good_potions ~= 0 and not last_did_hit and GameGetFrameNum() % 120 < 20 and state.init_timer > 120 and not stop_potion and ground_below
-    if GameGetFrameNum() % 10 == 0 and state.had_potion and #state.bad_potions == 0 and #state.good_potions == 0 then
+    local has_potions = false
+    for _, ent in ipairs(state.bad_potions) do
+        if EntityHasTag(ent, "potion") then
+            has_potions = true
+        end
+    end
+
+    local has_water_potion = can_hold_potion and (not is_ambrosia or target_is_ambrosia) and #state.water_potions ~= 0 and (douse or target_is_ambrosia) and (state.init_timer < no_shoot_time or state.last_did_hit or target_is_ambrosia)
+    local has_bad_potion = can_hold_potion and not has_water_potion and not is_ambrosia and (has_potions or tablet) and not state.last_did_hit and ((GameGetFrameNum() % 120 > 100 and state.init_timer > 120 and not state.stop_potion) or tablet)
+    local has_good_potion = can_hold_potion and not has_water_potion and not is_ambrosia and #state.good_potions ~= 0 and not state.last_did_hit and GameGetFrameNum() % 120 < 20 and state.init_timer > 120 and not state.stop_potion and ground_below
+
+    if GameGetFrameNum() % 10 == 0 and state.had_potion and not has_potions and #state.good_potions == 0 then
         local has_a_potion = false
         for _, item in ipairs(EntityGetAllChildren(state.items)) do
             if EntityHasTag(item, "potion") then
@@ -965,34 +1114,47 @@ local function hold_something()
             EntitySetComponentsWithTagEnabled(pity_potion, "enabled_in_inventory", true)
         end
     end
-    if has_water_potion or water_potion ~= nil then
+
+    if state.expected_held ~= nil and state.expected_held ~= holding then
+        spectate.nofun = true
+        spectate.disable_throwing(true, ctx.my_player.entity)
+    end
+
+    if has_water_potion or state.water_potion ~= nil then
+        state.expected_held = state.water_potions[1]
         np.SetActiveHeldEntity(state.entity, state.water_potions[1], false, false)
-        if water_potion == nil then
-            water_potion = state.water_potions[1]
+        if state.water_potion == nil then
+            state.water_potion = state.water_potions[1]
             changed_held = true
         end
         throw_water = target_is_ambrosia
-        bathe = not target_is_ambrosia
-    elseif (has_bad_potion or bad_potion ~= nil) and  (can_not_tablet or tablet) then
+        if throw_water then
+            state.had_potion = true
+        end
+        state.bathe = not target_is_ambrosia
+    elseif (has_bad_potion or state.bad_potion ~= nil) and tablet then
+        state.expected_held = state.bad_potions[i]
         if EntityHasTag(state.bad_potions[i], "potion") then
             state.had_potion = true
         end
         np.SetActiveHeldEntity(state.entity, state.bad_potions[i], false, false)
-        if bad_potion == nil then
-            bad_potion = state.bad_potions[i]
+        if state.bad_potion == nil then
+            state.bad_potion = state.bad_potions[i]
             changed_held = true
         end
-    elseif has_good_potion or good_potion ~= nil then
-        if EntityHasTag(state.bad_potions[i], "potion") then
+    elseif has_good_potion or state.good_potion ~= nil then
+        if EntityHasTag(state.good_potions[1], "potion") then
             state.had_potion = true
         end
+        state.expected_held = state.good_potions[1]
         np.SetActiveHeldEntity(state.entity, state.good_potions[1], false, false)
-        if good_potion == nil then
-            good_potion = state.good_potions[1]
+        if state.good_potion == nil then
+            state.good_potion = state.good_potions[1]
             changed_held = true
         end
     else
         if state.attack_wand ~= nil then
+            state.expected_held = state.attack_wand
             np.SetActiveHeldEntity(state.entity, state.attack_wand, false, false)
         end
     end
@@ -1006,13 +1168,12 @@ local target_has_ambrosia = false
 
 local target_is_polied = false
 
-local function better_player(length, did_hit, new_has_ambrosia, new_target_is_polied, potential_target)
-    return (last_length == nil or
-            (not did_hit and ((last_length > length or last_did_hit)
+local function better_player(length, did_hit, new_has_ambrosia, new_target_is_polied)
+    return (state.last_length == nil or
+            (not did_hit and ((state.last_length > length or state.last_did_hit)
                     or (new_target_is_polied and not target_is_polied)
                     or (not new_has_ambrosia and target_has_ambrosia))
             ))
-            and (not IsInvisible(potential_target) or length < 50*50)
 end
 
 local function find_target()
@@ -1021,31 +1182,33 @@ local function find_target()
     local arm = EntityGetAllChildren(ctx.my_player.entity, "player_arm_r")[1]
     local x, y = EntityGetHotspot(arm, "hand", true)
 
-    if target ~= nil then
-        local x1, y1 = EntityGetTransform(target)
+    if state.target ~= nil then
+        local x1, y1 = EntityGetTransform(state.target)
         if x1 == nil then
-            target = nil
-            last_length = nil
-            last_did_hit = true
+            state.target = nil
+            state.last_length = nil
+            state.last_did_hit = true
             target_has_ambrosia = false
             target_is_polied = false
         else
             local dx = x - x1
             local dy = y - y1
-            last_length = dx * dx + dy + dy
-            if not is_suitable_target(target) or (last_length > 768 * 768) or (IsInvisible(target) and last_length > 32*32) then
-                target = nil
-                last_length = nil
-                last_did_hit = true
+            state.last_length = dx * dx + dy + dy
+            if not is_suitable_target(state.target)
+                    or (state.last_length > (MAX_RADIUS + 128) * (MAX_RADIUS + 128))
+                    or (IsInvisible(state.target) and state.last_length > (INVIS_RANGE + 32)*(INVIS_RANGE + 32)) then
+                state.target = nil
+                state.last_length = nil
+                state.last_did_hit = true
                 target_has_ambrosia = false
                 target_is_polied = false
             end
         end
     end
-    if target ~= nil then
-        local t_x, t_y = EntityGetFirstHitboxCenter(target)
+    if state.target ~= nil then
+        local t_x, t_y = EntityGetFirstHitboxCenter(state.target)
         if t_x == nil then
-            t_x, t_y = EntityGetTransform(target)
+            t_x, t_y = EntityGetTransform(state.target)
         end
         state.aim_up = false
         state.aim_down = false
@@ -1061,14 +1224,12 @@ local function find_target()
                 end
             end
         end
-        last_did_hit = did_hit
-        target_has_ambrosia = has_ambrosia(target)
-        target_is_polied = EntityHasTag(target, "polymorphed")
+        state.last_did_hit = did_hit
+        target_has_ambrosia = has_ambrosia(state.target)
+        target_is_polied = EntityHasTag(state.target, "polymorphed")
     end
 
-    log("Trying to choose target")
     for _, potential_target in ipairs(potential_targets) do
-        log("Trying "..potential_target)
         if is_suitable_target(potential_target) then
             local t_x, t_y = EntityGetFirstHitboxCenter(potential_target)
             if t_x == nil then
@@ -1077,49 +1238,58 @@ local function find_target()
             local dx = x - t_x
             local dy = y - t_y
             local length = dx * dx + dy * dy
+            if (IsInvisible(potential_target) and length > INVIS_RANGE*INVIS_RANGE) or state.target == potential_target then
+                goto continue
+            end
             local did_hit, _, _ = RaytracePlatforms(x, y, t_x, t_y)
             local new_has_ambrosia = has_ambrosia(potential_target)
-            local new_target_is_polied = EntityHasTag(target, "polymorphed")
+            local new_target_is_polied = EntityHasTag(state.target, "polymorphed")
             local success = false
-            if better_player(length, did_hit, new_has_ambrosia, new_target_is_polied, potential_target) then
+            if better_player(length, did_hit, new_has_ambrosia, new_target_is_polied) then
                 success = true
                 state.aim_up = false
                 state.aim_down = false
             elseif did_hit then
                 local did_hit_up, _, _ = RaytracePlatforms(x, y, t_x, t_y - 7)
-                if better_player(length, did_hit_up, new_has_ambrosia, new_target_is_polied, potential_target) then
+                if better_player(length, did_hit_up, new_has_ambrosia, new_target_is_polied) then
                     success = true
                     state.aim_up = true
                     state.aim_down = false
                 elseif did_hit_up then
                     local did_hit_down, _, _ = RaytracePlatforms(x, y, t_x, t_y + 7)
-                    if better_player(length, did_hit_down, new_has_ambrosia, new_target_is_polied, potential_target) then
+                    if better_player(length, did_hit_down, new_has_ambrosia, new_target_is_polied) then
                         success = true
-                        target = potential_target
                         state.aim_up = false
                         state.aim_down = true
                     end
                 end
             end
-            if success then
-                last_length = length
-                last_did_hit = did_hit
+            if success and (not IsInvisible(potential_target) or not did_hit) then
+                state.last_length = length
+                state.last_did_hit = did_hit
                 target_has_ambrosia = new_has_ambrosia
                 target_is_polied = new_target_is_polied
-                target = potential_target
+                state.target = potential_target
             end
+            ::continue::
         end
     end
-    if last_did_hit then
+    if state.last_did_hit then
         local root_id = ctx.my_player.entity
         local pos_x, pos_y = EntityGetTransform(root_id)
         for _, id in pairs(EntityGetInRadiusWithTag(pos_x, pos_y, 256, "mortal")) do
-            if EntityGetComponent(id, "GenomeDataComponent") ~= nil and EntityGetComponent(root_id, "GenomeDataComponent") ~= nil and EntityGetHerdRelation(root_id, id) < -100 then
+            if EntityGetFilename(id) ~= 'data/entities/misc/invisibility_last_known_player_position.xml'
+                    and EntityGetComponent(id, "GenomeDataComponent") ~= nil
+                    and EntityGetComponent(root_id, "GenomeDataComponent") ~= nil
+                    and EntityGetHerdRelation(root_id, id) < -10 then
                 local t_x, t_y = EntityGetTransform(id)
                 local did_hit, _, _ = RaytracePlatforms(x, y, t_x, t_y)
-                if not did_hit then
-                    last_did_hit = false
-                    target = id
+                local dx = x - t_x
+                local dy = y - t_y
+                local length = dx * dx + dy * dy
+                if not did_hit and not (IsInvisible(id) and length > INVIS_RANGE*INVIS_RANGE) then
+                    state.last_did_hit = false
+                    state.target = id
                     target_is_polied = false
                     target_has_ambrosia = false
                     break
@@ -1129,13 +1299,93 @@ local function find_target()
     end
 end
 
+local function cycle_wands()
+    if state.target ~= nil
+            and state.water_potion == nil and state.good_potion == nil and state.bad_potion == nil
+            and not state.last_did_hit
+            and state.init_timer > no_shoot_time then
+        local hp = util.get_ent_health(state.target)
+        if state.good_wands[state.target or 1] == nil then
+            state.good_wands[state.target or 1] = {}
+        end
+        if state.target_hp[1] == hp then
+            local f = state.target_hp[2] + 64
+            if table.contains(state.good_wands[state.target or 1], state.attack_wand) then
+                f = f + 256
+            end
+            if GameGetFrameNum() == f then
+                if state.bad_wands[state.target or 1] == nil then
+                    state.bad_wands[state.target or 1] = {}
+                end
+                if not table.contains(state.bad_wands[state.target or 1], state.attack_wand) then
+                    table.insert(state.bad_wands[state.target or 1], state.attack_wand)
+                end
+                state.attack_wand = wandfinder.find_attack_wand(combine_tables(state.empty_wands, state.bad_wands[state.target or 1]))
+                if state.attack_wand == nil then
+                    state.bad_wands[state.target or 1] = {}
+                    state.attack_wand = wandfinder.find_attack_wand(state.empty_wands)
+                end
+                changed_held = true
+                state.target_hp = {-1, -1}
+            end
+        else
+            if state.target_hp[1] ~= -1 and not table.contains(state.good_wands[state.target or 1], state.attack_wand) then
+                table.insert(state.good_wands[state.target or 1], state.attack_wand)
+            end
+            state.target_hp = {hp, GameGetFrameNum()}
+        end
+    else
+        state.target_hp = {-1, -1}
+    end
+end
+
+local function stay_away_from()
+    local mx, my = EntityGetTransform(ctx.my_player.entity)
+    if GameGetFrameNum() % 4 == 0 then
+        for _, proj in ipairs(EntityGetInRadiusWithTag(mx, my, 256, "projectile")) do
+            if not table.contains(state.ignore, proj) then
+                local com = EntityGetFirstComponentIncludingDisabled(proj, "ProjectileComponent")
+                if EntityGetFilename(proj) == "data/entities/projectiles/deck/regeneration_field.xml"
+                        or (com ~= nil and ComponentGetValue2(com, "mShooterHerdId") == state.herd_id
+                            and (ComponentGetValue2(com, "friendly_fire")
+                                or (ComponentGetValue2(com, "collide_with_shooter_frames") == -1
+                                    and ComponentGetValue2(com, "mWhoShot") == ctx.my_player.entity))) then
+                    table.insert(state.ignore, proj)
+                    goto continue
+                end
+                local x, y = EntityGetTransform(proj)
+                state.stationary_check[proj] = {x, y}
+            end
+            ::continue::
+        end
+    elseif GameGetFrameNum() % 4 == 2 then
+        for _, proj in ipairs(EntityGetInRadiusWithTag(mx, my, 256, "projectile")) do
+            local x, y = EntityGetTransform(proj)
+            local p = state.stationary_check[proj]
+            if p ~= nil then
+                table.insert(state.ignore, proj)
+                if p[1] == x and p[2] == y then
+                    table.insert(state.stay_away, {x, y, proj})
+                end
+            end
+        end
+        state.stationary_check = {}
+    end
+    if GameGetFrameNum() % 10 == 6 then
+        for _, ent in ipairs(EntityGetInRadius(mx, my, 256)) do
+            if EntityGetFirstComponentIncludingDisabled(ent, "TeleportComponent") ~= nil and not table.contains(state.ignore, ent) then
+                table.insert(state.ignore, ent)
+                local x, y = EntityGetTransform(ent)
+                table.insert(state.stay_away, {x, y, ent})
+            end
+        end
+    end
+end
+
 local kick_wait = 0
 
 local function update()
     local var = EntityGetFirstComponentIncludingDisabled(ctx.my_player.entity, "VariableStorageComponent", "ew_damage_tracker")
-    if GameGetFrameNum() % 30 == 0 then
-        ComponentSetValue2(var, "value_int", 0)
-    end
     state.dtype = ComponentGetValue2(var, "value_int")
     -- No taking control back, even after pressing esc.
     ComponentSetValue2(state.control_component, "enabled", false)
@@ -1152,7 +1402,7 @@ local function update()
 
     find_target()
 
-    do_kick = last_length ~= nil and last_length < 100
+    do_kick = state.last_length ~= nil and state.last_length < no_shoot_time
 
     hold_something()
 
@@ -1201,10 +1451,17 @@ local function update()
         teleport_outside_cursed()
     end
     EntityRemoveIngestionStatusEffect(ctx.my_player.entity, "CHARM")
+
+    cycle_wands()
+
+    stay_away_from()
+
+    ComponentSetValue2(var, "value_int", 0)
 end
 
 function module.on_world_update()
     local active = GameHasFlagRun("ew_flag_notplayer_active")
+            and not ctx.proxy_opt.perma_death
     if active and EntityGetIsAlive(ctx.my_player.entity) and EntityHasTag(ctx.my_player.entity, "ew_notplayer") then
         if state == nil then
             init_state()
